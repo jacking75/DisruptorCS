@@ -17,7 +17,13 @@ MinVer 버전 하한 `0.10` 을 한곳에 모아 두 패키지의 버전이 갈�
 검증: 로컬 피드로 실제 소비자 프로젝트에 설치해 DISR004 발생·`using` 없는 DI 등록·이벤트 소비까지 확인,
 Release/Debug 빌드 경고 0, 테스트 113+20 전부 통과. CHANGELOG 를 `[0.10.0] - 2026-08-27` 로
 확정하고 docs/RELEASE.md 를 9단계(소비자 게이트 추가)로 갱신했다.
-main 에 커밋·푸시까지 완료. 남은 것은 `git tag v0.10.0` → `./build/pack.ps1` → `dotnet nuget push` 뿐이다.
+배포까지 완료(16:13 KST): `v0.10.0` 태그 푸시 → 태그 기준 pack → nuget.org 에 두 패키지와
+심볼 업로드, GitHub Release 생성. 인덱싱은 코어 220초·호스팅 300초 걸렸다. 배포 후 검증으로
+로컬 피드를 끊고 nuget.org 에서만 복원해 코어 실행·DISR004 발생·호스팅의 `DisruptorCS 0.10.0`
+전이 의존성 해석·`using` 없는 DI 등록까지 확인했다.
+주의: 갓 올린 패키지는 flat container(200)보다 검색 인덱스가 늦게 따라와서, 그동안
+`dotnet add package DisruptorCS` (버전 생략)는 "사용할 수 있는 버전이 없습니다"로 실패한다.
+`--version 0.10.0` 을 명시하면 즉시 복원된다.
 
 ## 2026-08-27 15:05 KST — IMPROVEMENTS.md 미완 항목 마무리 (샘플 4종·DISR005·Coyote·ValueWorkerPool·POH)
 
