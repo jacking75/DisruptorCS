@@ -1,0 +1,15 @@
+=== 지연 분포 측정 ===
+게임 서버는 평균이 아니라 tail latency 가 중요합니다.
+60Hz 틱 예산 = 16.6ms → '>15ms' 열이 0이 아니면 틱이 통째로 날아갑니다.
+
+--- [1] 백프레셔 발생 시 Next() 지연 (ring=1024, 느린 컨슈머) ---
+SP / SpinOnlyBackoff                   p50=     0.0us p99=      0.1us p99.9=   4,784.0us p99.99=   8,394.4us max=  11.04ms >1ms=   565 >5ms=   278 >15ms=     0      102,398 ops/s
+SP / SleepingBackoff                   p50=     0.0us p99=      0.1us p99.9=      66.7us p99.99=  15,863.7us max=  19.94ms >1ms=   293 >5ms=   292 >15ms=   290       65,861 ops/s
+MP / SpinOnlyBackoff                   p50=     0.0us p99=      0.1us p99.9=   3,352.6us p99.99=  10,720.3us max=  11.91ms >1ms=   517 >5ms=   288 >15ms=     0       93,892 ops/s
+
+--- [2] 유휴 후 단발 게시 wake-up 지연 (20,000회) ---
+BlockingWaitStrategy                   p50=    19.1us p99=     67.7us p99.9=     251.5us p99.99=     674.9us max=  12.67ms >1ms=     2 >5ms=     2 >15ms=     0          311 ops/s
+TimeoutBlocking(1ms)                   p50=    22.8us p99=    122.5us p99.9=     380.5us p99.99=     711.6us max=   1.36ms >1ms=     1 >5ms=     0 >15ms=     0          375 ops/s
+YieldingWaitStrategy                   p50=     2.4us p99=    130.5us p99.9=     655.9us p99.99=   1,527.4us max=   2.03ms >1ms=     7 >5ms=     0 >15ms=     0          304 ops/s
+BusySpinWaitStrategy                   p50=     2.6us p99=     27.9us p99.9=     366.0us p99.99=     698.0us max=   8.03ms >1ms=     2 >5ms=     2 >15ms=     0          329 ops/s
+PhasedBackoff(spin 100us→blocking)     p50=    25.5us p99=    110.1us p99.9=     944.0us p99.99=  21,051.7us max=  29.88ms >1ms=    20 >5ms=     8 >15ms=     5          293 ops/s

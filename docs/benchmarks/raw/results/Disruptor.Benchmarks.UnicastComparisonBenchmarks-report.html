@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8' />
+<title>Disruptor.Benchmarks.UnicastComparisonBenchmarks-20260827-131525</title>
+
+<style type="text/css">
+	table { border-collapse: collapse; display: block; width: 100%; overflow: auto; }
+	td, th { padding: 6px 13px; border: 1px solid #ddd; text-align: right; }
+	tr { background-color: #fff; border-top: 1px solid #ccc; }
+	tr:nth-child(even) { background: #f8f8f8; }
+</style>
+</head>
+<body>
+<pre><code>
+BenchmarkDotNet v0.14.0, Windows 11 (10.0.26200.9168)
+Unknown processor
+.NET SDK 10.0.400
+  [Host]     : .NET 10.0.11 (10.0.1126.37416), X64 RyuJIT AVX2
+  Job-ZHZRWW : .NET 10.0.11 (10.0.1126.37416), X64 RyuJIT AVX2
+</code></pre>
+<pre><code>IterationCount=5  RunStrategy=Monitoring  WarmupCount=2  
+</code></pre>
+
+<table>
+<thead><tr><th>Method               </th><th>RingSize</th><th>Mean</th><th>Error</th><th>StdDev</th><th>Ratio</th><th>RatioSD</th><th>Gen0</th><th>Allocated</th><th>Alloc Ratio</th>
+</tr>
+</thead><tbody><tr><td>&#39;DisruptorCS (Yielding)&#39;</td><td>1024</td><td>36.177 ms</td><td>12.258 ms</td><td>3.1835 ms</td><td>1.01</td><td>0.12</td><td>-</td><td>45.94 KB</td><td>1.00</td>
+</tr><tr><td>&#39;disruptor-net (Yielding)&#39;</td><td>1024</td><td>12.323 ms</td><td>12.002 ms</td><td>3.1168 ms</td><td>0.34</td><td>0.08</td><td>-</td><td>48.46 KB</td><td>1.05</td>
+</tr><tr><td>&#39;Channel&lt;T&gt; (bounded SPSC)&#39;</td><td>1024</td><td>339.749 ms</td><td>112.282 ms</td><td>29.1592 ms</td><td>9.45</td><td>1.08</td><td>1000.0000</td><td>62518.71 KB</td><td>1,360.95</td>
+</tr><tr><td>&#39;DisruptorCS (Yielding)&#39;</td><td>65536</td><td>6.290 ms</td><td>3.526 ms</td><td>0.9157 ms</td><td>1.02</td><td>0.19</td><td>-</td><td>2565.91 KB</td><td>1.00</td>
+</tr><tr><td>&#39;disruptor-net (Yielding)&#39;</td><td>65536</td><td>9.611 ms</td><td>2.711 ms</td><td>0.7041 ms</td><td>1.55</td><td>0.23</td><td>-</td><td>2568.81 KB</td><td>1.00</td>
+</tr><tr><td>&#39;Channel&lt;T&gt; (bounded SPSC)&#39;</td><td>65536</td><td>234.811 ms</td><td>27.137 ms</td><td>7.0475 ms</td><td>37.96</td><td>5.04</td><td>1000.0000</td><td>63525.78 KB</td><td>24.76</td>
+</tr></tbody></table>
+</body>
+</html>

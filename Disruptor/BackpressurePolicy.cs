@@ -32,9 +32,12 @@ public sealed class PublishGate<T> where T : class
 {
     private readonly RingBuffer<T> _ringBuffer;
     private readonly DisruptorMetrics? _metrics;
-    private long _dropped;
-    private long _rejected;
-    private long _published;
+
+    // 모든 프로듀서가 하나의 Interlocked 대상을 공유하면 그 카운터가 게시 경로의 스케일링을 깎는다
+    // (캐시라인 핑퐁). 스트라이핑하면 스레드별로 다른 라인에 기록한다.
+    private readonly StripedCounter _dropped = new();
+    private readonly StripedCounter _rejected = new();
+    private readonly StripedCounter _published = new();
 
     public PublishGate(RingBuffer<T> ringBuffer, DisruptorMetrics? metrics = null)
     {
@@ -49,11 +52,14 @@ public sealed class PublishGate<T> where T : class
     /// <summary><see cref="BackpressurePolicy.FailAfterTimeout"/>의 기본 타임아웃.</summary>
     public TimeSpan DefaultTimeout { get; init; } = TimeSpan.FromMilliseconds(50);
 
-    public long DroppedCount => Volatile.Read(ref _dropped);
+    /// <summary>혼잡으로 드롭된 건수. 스트라이프 합산이라 시점 일치를 보장하지 않습니다.</summary>
+    public long DroppedCount => _dropped.Value;
 
-    public long RejectedCount => Volatile.Read(ref _rejected);
+    /// <summary>타임아웃으로 거절된 건수.</summary>
+    public long RejectedCount => _rejected.Value;
 
-    public long PublishedCount => Volatile.Read(ref _published);
+    /// <summary>게시에 성공한 건수.</summary>
+    public long PublishedCount => _published.Value;
 
     /// <summary>
     /// 정책에 따라 이벤트를 게시합니다.
@@ -78,7 +84,7 @@ public sealed class PublishGate<T> where T : class
             case BackpressurePolicy.DropWhenCongested:
                 if (_ringBuffer.IsCongested(CongestionThreshold))
                 {
-                    Interlocked.Increment(ref _dropped);
+                    _dropped.Increment();
                     _metrics?.RecordDropped(opCode);
                     return false;
                 }
@@ -95,7 +101,7 @@ public sealed class PublishGate<T> where T : class
             {
                 if (!_ringBuffer.TryNext(out long sequence, timeout ?? DefaultTimeout))
                 {
-                    Interlocked.Increment(ref _rejected);
+                    _rejected.Increment();
                     _metrics?.RecordRejected(opCode);
                     return false;
                 }
@@ -120,15 +126,15 @@ public sealed class PublishGate<T> where T : class
             // 채우는 도중 예외가 나도 반드시 게시해야 한다.
             // 게시하지 않으면 그 슬롯에서 링 버퍼가 영구히 막힌다.
             _ringBuffer.Publish(sequence);
-            Interlocked.Increment(ref _published);
+            _published.Increment();
             _metrics?.RecordPublished();
         }
     }
 
     public void ResetCounters()
     {
-        Volatile.Write(ref _dropped, 0);
-        Volatile.Write(ref _rejected, 0);
-        Volatile.Write(ref _published, 0);
+        _dropped.Reset();
+        _rejected.Reset();
+        _published.Reset();
     }
 }

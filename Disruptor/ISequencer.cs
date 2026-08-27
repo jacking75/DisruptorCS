@@ -18,6 +18,9 @@ public interface ISequencer
     /// <summary>이 시퀀서가 사용하는 대기 전략.</summary>
     IWaitStrategy WaitStrategy { get; }
 
+    /// <summary>커서 시퀀스 객체. 배리어/폴러 구성에 사용합니다.</summary>
+    Sequence CursorSequence { get; }
+
     /// <summary>다음 시퀀스를 할당받습니다. 용량이 없으면 대기합니다.</summary>
     long Next(int n = 1);
 

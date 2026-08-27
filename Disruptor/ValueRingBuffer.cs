@@ -28,10 +28,12 @@ public sealed class ValueRingBuffer<T> : IRingBufferCore where T : struct
     private readonly T[] _entries;
     private readonly int _indexMask;
     private readonly ISequencer _sequencer;
+    private readonly SequencerDispatcher _dispatcher;
 
     private ValueRingBuffer(ISequencer sequencer, Func<T>? eventFactory)
     {
         _sequencer = sequencer;
+        _dispatcher = new SequencerDispatcher(sequencer);
         _indexMask = sequencer.BufferSize - 1;
         _entries = new T[sequencer.BufferSize];
 
@@ -76,56 +78,56 @@ public sealed class ValueRingBuffer<T> : IRingBufferCore where T : struct
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public long Next(int n = 1) => _sequencer.Next(n);
+    public long Next(int n = 1) => n == 1 ? _dispatcher.Next() : _dispatcher.Next(n);
 
-    public long Next(CancellationToken cancellationToken) => _sequencer.Next(1, cancellationToken);
+    public long Next(CancellationToken cancellationToken) => _dispatcher.Next(1, cancellationToken);
 
-    public long Next(int n, CancellationToken cancellationToken) => _sequencer.Next(n, cancellationToken);
+    public long Next(int n, CancellationToken cancellationToken) => _dispatcher.Next(n, cancellationToken);
 
-    public bool TryNext(out long sequence, int n = 1) => _sequencer.TryNext(out sequence, n);
+    public bool TryNext(out long sequence, int n = 1) => _dispatcher.TryNext(out sequence, n);
 
-    public bool TryNext(out long sequence, TimeSpan timeout) => _sequencer.TryNext(out sequence, 1, timeout);
+    public bool TryNext(out long sequence, TimeSpan timeout) => _dispatcher.TryNext(out sequence, 1, timeout);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Publish(long sequence) => _sequencer.Publish(sequence);
+    public void Publish(long sequence) => _dispatcher.Publish(sequence);
 
-    public void Publish(long lo, long hi) => _sequencer.Publish(lo, hi);
+    public void Publish(long lo, long hi) => _dispatcher.Publish(lo, hi);
 
     /// <summary>이벤트를 게시합니다. translator는 슬롯을 ref로 받습니다.</summary>
     public void PublishEvent(ValueEventTranslator translator)
     {
-        long sequence = _sequencer.Next();
+        long sequence = _dispatcher.Next();
         try
         {
             translator(ref this[sequence], sequence);
         }
         finally
         {
-            _sequencer.Publish(sequence);
+            _dispatcher.Publish(sequence);
         }
     }
 
     /// <summary>인자와 함께 이벤트를 게시합니다.</summary>
     public void PublishEvent<TArg>(ValueEventTranslator<TArg> translator, TArg arg)
     {
-        long sequence = _sequencer.Next();
+        long sequence = _dispatcher.Next();
         try
         {
             translator(ref this[sequence], sequence, arg);
         }
         finally
         {
-            _sequencer.Publish(sequence);
+            _dispatcher.Publish(sequence);
         }
     }
 
     /// <summary>RAII 스타일 이벤트 게시 (using 패턴).</summary>
     public ValueEventScope PublishEventScope()
-        => new(this, _sequencer.Next());
+        => new(this, _dispatcher.Next());
 
     /// <summary>RAII 스타일 이벤트 게시 시도.</summary>
     public ValueEventScope TryPublishEventScope(TimeSpan timeout)
-        => _sequencer.TryNext(out long sequence, 1, timeout)
+        => _dispatcher.TryNext(out long sequence, 1, timeout)
             ? new ValueEventScope(this, sequence)
             : default;
 
@@ -165,7 +167,26 @@ public sealed class ValueRingBuffer<T> : IRingBufferCore where T : struct
     public bool IsPublished(long sequence) => _sequencer.IsAvailable(sequence);
 
     public long GetHighestPublishedSequence(long lowerBound, long availableSequence)
-        => _sequencer.GetHighestPublishedSequence(lowerBound, availableSequence);
+        => _dispatcher.GetHighestPublishedSequence(lowerBound, availableSequence);
+
+    /// <summary>프로듀서 커서 시퀀스 객체.</summary>
+    internal Sequence CursorSequence => _sequencer.CursorSequence;
+
+    /// <summary>
+    /// 전용 스레드 없이 호출자의 스레드에서 이벤트를 당겨 처리하는 폴러를 만듭니다.
+    /// </summary>
+    public ValueEventPoller<T> NewPoller(params Sequence[] dependentSequences)
+        => new(this, CursorSequence, dependentSequences ?? []);
+
+    /// <summary>
+    /// 연속된 슬롯 조각을 쓰기 가능한 span 으로 노출합니다. 랩 경계를 넘지 않는 범위여야 합니다.
+    /// </summary>
+    internal Span<T> GetSegment(long startSequence, long endSequenceInclusive)
+    {
+        int startIndex = (int)startSequence & _indexMask;
+        int length = (int)(endSequenceInclusive - startSequence + 1);
+        return new Span<T>(_entries, startIndex, length);
+    }
 
     /// <summary>슬롯을 <c>default</c>로 초기화합니다. 구조체가 참조 필드를 가질 때 사용합니다.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

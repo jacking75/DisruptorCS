@@ -7,6 +7,29 @@ namespace Disruptor;
 /// </summary>
 public struct ProducerBackoffState
 {
+    /// <summary>
+    /// 커널에 양보하기 전에 순수 스핀할 횟수.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SpinWait"/>는 약 10회 만에 <c>Thread.Yield()</c>로 넘어갑니다. 그런데 링 버퍼의
+    /// 백프레셔는 대개 <b>컨슈머가 수백 나노초 안에 슬롯을 비우는</b> 짧은 대기입니다.
+    /// 그 상황에서 양보하면 커널 진입(수백 ns~us)이 대기 자체보다 비싸집니다 —
+    /// 작은 링에서 프로듀서와 컨슈머가 핑퐁하면 이 비용이 전체 처리량을 지배합니다.
+    /// 그래서 먼저 충분히 스핀하고, 그래도 안 풀릴 때만 <see cref="SpinWait"/>의 에스컬레이션에 넘깁니다.
+    /// </remarks>
+    private const int AggressiveSpinIterations = 256;
+
+    /// <summary>
+    /// 순수 스핀 1회의 pause 횟수.
+    /// </summary>
+    /// <remarks>
+    /// <b>작아야 합니다.</b> Skylake 이후 인텔 CPU 에서 <c>PAUSE</c> 한 번은 약 140 사이클이므로,
+    /// <c>Thread.SpinWait(256)</c> 은 약 10us 동안 <b>조건을 재확인하지 않고</b> 멈춰 있는 것과 같습니다.
+    /// 컨슈머가 수백 나노초 안에 슬롯을 비우는 핑퐁 상황에서는 그 자체가 지연이 됩니다.
+    /// 짧게 멈추고 자주 확인하는 편이 낫습니다.
+    /// </remarks>
+    private const int SpinCountPerIteration = 1;
+
     private SpinWait _spin;
 
     /// <summary>이번 대기에서 반복한 횟수.</summary>
@@ -19,18 +42,25 @@ public struct ProducerBackoffState
     }
 
     /// <summary>
-    /// <see cref="SpinWait.SpinOnce(int)"/>를 <c>Thread.Sleep(1)</c> 없이 1회 수행합니다.
+    /// <c>Thread.Sleep(1)</c> 없이 1회 대기합니다. 처음에는 순수 스핀하고, 길어지면 양보합니다.
     /// </summary>
     /// <remarks>
-    /// 기본 <c>SpinOnce()</c>는 일정 횟수 후 <c>Thread.Sleep(1)</c>을 호출하는데,
-    /// Windows의 기본 타이머 분해능(15.6ms) 때문에 실제로는 15ms 이상 잠듭니다.
-    /// 60Hz 게임 서버의 틱 예산(16.6ms)을 통째로 소모하므로 반드시 비활성화해야 합니다.
+    /// 어떤 경로에서도 <c>Thread.Sleep(1)</c>을 호출하지 않습니다. Windows 기본 타이머 분해능(15.6ms)
+    /// 때문에 60Hz 게임 서버의 틱 예산(16.6ms)을 통째로 소모하기 때문입니다.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void SpinOnceWithoutSleep()
     {
+        long iteration = IterationCount++;
+
+        if (iteration < AggressiveSpinIterations)
+        {
+            // 짧게 멈추고(PAUSE) 곧바로 조건을 재확인한다.
+            Thread.SpinWait(SpinCountPerIteration);
+            return;
+        }
+
         _spin.SpinOnce(sleep1Threshold: -1);
-        IterationCount++;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -66,6 +96,16 @@ public struct ProducerBackoffState
 public interface IProducerBackoff
 {
     /// <summary>
+    /// <c>elapsedTicks</c> 를 실제로 사용하는가.
+    /// </summary>
+    /// <remarks>
+    /// false 면 시퀀서가 대기 루프에서 <c>Stopwatch.GetTimestamp()</c> 호출을 생략합니다.
+    /// QPC 는 시리얼라이징 성격이라, 몇 번의 스핀으로 풀리는 짧은 백프레셔에서는
+    /// 이 호출 자체가 해소 지연의 상당 부분을 차지합니다.
+    /// </remarks>
+    bool NeedsTime => false;
+
+    /// <summary>
     /// 백프레셔 대기 1회.
     /// </summary>
     /// <param name="state">호출자 스택의 대기 상태</param>
@@ -94,6 +134,9 @@ public sealed class SpinOnlyBackoff : IProducerBackoff
 public sealed class TimeBoundedBackoff : IProducerBackoff
 {
     private readonly long _limitTicks;
+
+    /// <inheritdoc/>
+    public bool NeedsTime => true;
 
     public TimeBoundedBackoff(TimeSpan limit)
     {

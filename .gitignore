@@ -416,3 +416,7 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# BenchmarkDotNet 실행 로그 (결과 리포트만 커밋한다)
+docs/benchmarks/raw/*.log
+BenchmarkDotNet.Artifacts/

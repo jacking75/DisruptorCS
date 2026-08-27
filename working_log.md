@@ -1,5 +1,34 @@
 # 작업 로그
 
+## 2026-08-27 13:52 KST — IMPROVEMENTS.md Wave 1~4 전면 구현
+
+설계서의 성능·안정성·채택 항목을 전부 구현했다. 코어에는 소비 루프 배치 재구성(+87%),
+`SequencerDispatcher`(sealed 구체 타입 분기로 인터페이스 디스패치 제거), Blocking 게시 경로의
+lock 제거(39.1ns→4.1ns), 백프레셔 QPC 절감, `StripedCounter`, `MaxBatchSize`, 배치 핸들러 API를 적용했다.
+안정성은 저널 v2 무결성(XxHash3+길이상한+단조검증+복구모드), `HighResolutionTimerScope`(유휴 틱 15.40→1.52ms),
+`ResilientExceptionHandler.Default` 공유 스트릭 결함 수정, 스톨 rate-limit, 수명주기 가드,
+정지 샤드 fail-fast를 넣었다. 신규 프로젝트로 Roslyn Analyzer(DISR001~004, 패키지 동봉),
+Extensions.Hosting(DI/HostedService/HealthCheck), Soak 하니스, Analyzer 테스트, 샘플을 추가했다.
+구현 중 `DrainProcessors`/`WorkerPool.DrainAndHalt`가 `Thread.Sleep(1)`을 쓰고 있던 것을 발견해 고쳤다
+— 라이브러리의 다른 모든 대기 경로에서 금지한 호출이다.
+실측: 처리량 69M→**250M ops/s**(4.0ns/op, 할당 0), Soak 2분 2,480라운드 4,960만 이벤트 위반 0,
+테스트 60→123개 전부 통과. disruptor-net 비교는 **큰 링에서 1.5배 우세, 작은 링(백프레셔 포화)에서
+2.9배 열세**로 나왔고, 배제한 가설 6가지와 함께 `docs/benchmarks/`에 미해결 항목으로 공개했다.
+문서는 README를 영어 우선(한국어 병행)으로 전환하고 CHANGELOG·CONTRIBUTING·RELEASE·analyzer 규칙 문서를 작성했다.
+
+## 2026-08-27 11:51 KST — 고성능·안정성 정밀 재조사 및 채택 전략 설계서(IMPROVEMENTS.md) 작성
+
+커밋 5d19229 전체 소스를 정밀 재리뷰하고 가설 검증 프로브 3종을 실측해 `IMPROVEMENTS.md`(약 1,850줄)를 작성했다.
+3대 실측 발견: (1) 소비 루프의 per-event try/catch·부대 검사 제거로 소비자 처리량 **+87%**(339M→649M ops/s),
+이때 struct 제네릭 디버추얼라이제이션은 .NET 10 Dynamic PGO 덕에 **효과 없음**을 확인,
+(2) BlockingWaitStrategy의 게시당 lock+PulseAll이 39.1ns로 fence 방식(4.1ns)의 10배이며
+per-event 게시 처리량을 1/6~1/7로 깎음(8.6M vs 50~60M ops/s), (3) 유휴 OnTimeout(1ms)이
+Windows 타이머 양자화로 실측 15.40ms 간격 → timeBeginPeriod(1) 적용 시 1.52ms.
+그 외 ResilientExceptionHandler.Default 공유 스트릭 결함, 저널 무결성 공백(해시/길이상한/단조 검증)
+등을 문서화하고 각 항목의 구현 코드를 상세 기술했다. 채택 전략으로 영어 우선 문서화, EventPoller(스레드 없는
+폴링 소비), Microsoft.Extensions 통합, Roslyn Analyzer, disruptor-net 정직 비교·포지셔닝("게임 서버 배포판")을
+설계하고 Wave 1~4 로드맵(약 195h)으로 정리했다. README에 문서 링크를 추가했다.
+
 ## 2026-08-27 11:15 KST — EVALUATION.md 개선 항목 P0~P3 전면 구현
 
 설계서의 결함 12건과 개선 로드맵 P0(정확성)~P3(게임 서버 도메인 레이어)를 모두 구현했다.

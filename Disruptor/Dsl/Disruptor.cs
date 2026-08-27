@@ -31,6 +31,7 @@ public sealed class Disruptor<T> : DisruptorBase where T : class
                 PipelineName = Options.Name,
                 Backoff = Options.ProducerBackoff,
                 StallThreshold = Options.StallThreshold,
+                StallReportInterval = Options.StallReportInterval,
                 OnStall = info =>
                 {
                     Metrics?.RecordStall(info);
@@ -69,6 +70,12 @@ public sealed class Disruptor<T> : DisruptorBase where T : class
     public EventHandlerGroup HandleEventsWith(params IEventHandler<T>[] handlers)
         => CreateEventProcessors([], handlers);
 
+    /// <summary>
+    /// 배치 핸들러를 등록합니다. 이벤트 구간을 span 으로 통째로 받습니다.
+    /// </summary>
+    public EventHandlerGroup HandleEventsWith(params IBatchEventHandler<T>[] handlers)
+        => CreateBatchProcessors([], handlers);
+
     /// <summary>이벤트를 여러 워커에게 분배하는 워커 풀을 등록합니다.</summary>
     public EventHandlerGroup HandleEventsWithWorkerPool(
         int workerCount, Func<int, IWorkHandler<T>> workHandlerFactory)
@@ -92,9 +99,34 @@ public sealed class Disruptor<T> : DisruptorBase where T : class
         public EventHandlerGroup Then(params IEventHandler<T>[] handlers)
             => _disruptor.CreateEventProcessors(Sequences, handlers);
 
+        /// <summary>이 그룹이 완료된 후에 실행될 배치 핸들러를 등록합니다.</summary>
+        public EventHandlerGroup Then(params IBatchEventHandler<T>[] handlers)
+            => _disruptor.CreateBatchProcessors(Sequences, handlers);
+
         /// <summary>이 그룹이 완료된 후에 실행될 워커 풀을 등록합니다.</summary>
         public EventHandlerGroup ThenWorkerPool(int workerCount, Func<int, IWorkHandler<T>> workHandlerFactory)
             => _disruptor.CreateWorkerPool(Sequences, workerCount, workHandlerFactory);
+
+        /// <summary>
+        /// 두 그룹을 합칩니다. 이후 <see cref="Then(IEventHandler{T}[])"/>는 <b>양쪽 모두</b>를 기다립니다.
+        /// </summary>
+        /// <example>
+        /// <code>
+        /// var a = disruptor.HandleEventsWith(journal);
+        /// var b = disruptor.HandleEventsWith(antiCheat);
+        /// a.And(b).Then(logic);     // journal 과 antiCheat 이 모두 끝난 뒤 logic
+        /// </code>
+        /// </example>
+        public EventHandlerGroup And(EventHandlerGroup other)
+        {
+            ArgumentNullException.ThrowIfNull(other);
+
+            var merged = new Sequence[Sequences.Length + other.Sequences.Length];
+            Sequences.CopyTo(merged, 0);
+            other.Sequences.CopyTo(merged, Sequences.Length);
+
+            return new EventHandlerGroup(_disruptor, merged);
+        }
     }
 
     private EventHandlerGroup CreateEventProcessors(
@@ -114,8 +146,47 @@ public sealed class Disruptor<T> : DisruptorBase where T : class
             var barrier = _ringBuffer.NewBarrier(barrierSequences);
             var processor = new BatchEventProcessor<T>(_ringBuffer, barrier, handlers[i])
             {
-                Metrics = Metrics,
+                MaxBatchSize = Options.MaxBatchSize,
             };
+            processor.Recorder = Metrics?.CreateRecorder(processor.Name);
+
+            if (_defaultExceptionHandler is not null)
+                processor.SetExceptionHandler(_defaultExceptionHandler);
+
+            processor.Halted += RaiseProcessorHalted;
+
+            _batchProcessors.Add(processor);
+            RegisteredProcessors.Add(processor);
+            processorSequences[i] = processor.Sequence;
+
+            RegisterProcessorDiagnostics(processor);
+        }
+
+        UpdateGatingSequences(barrierSequences, processorSequences);
+
+        return new EventHandlerGroup(this, processorSequences);
+    }
+
+    private EventHandlerGroup CreateBatchProcessors(
+        Sequence[] barrierSequences,
+        IBatchEventHandler<T>[] handlers)
+    {
+        ArgumentNullException.ThrowIfNull(handlers);
+        if (handlers.Length == 0)
+            throw new ArgumentException("최소 1개의 핸들러가 필요합니다.", nameof(handlers));
+
+        EnsureNotStarted();
+
+        var processorSequences = new Sequence[handlers.Length];
+
+        for (int i = 0; i < handlers.Length; i++)
+        {
+            var barrier = _ringBuffer.NewBarrier(barrierSequences);
+            var processor = new BatchEventProcessor<T>(_ringBuffer, barrier, handlers[i])
+            {
+                MaxBatchSize = Options.MaxBatchSize,
+            };
+            processor.Recorder = Metrics?.CreateRecorder(processor.Name);
 
             if (_defaultExceptionHandler is not null)
                 processor.SetExceptionHandler(_defaultExceptionHandler);

@@ -51,8 +51,17 @@ public sealed record SequencerOptions
     /// <summary>이 시간을 넘게 블록되면 <see cref="OnStall"/>이 호출됩니다.</summary>
     public TimeSpan StallThreshold { get; init; } = TimeSpan.FromMilliseconds(250);
 
-    /// <summary>스톨 감지 콜백. 블록된 프로듀서 스레드에서 1회만 호출됩니다.</summary>
+    /// <summary>스톨 감지 콜백. 블록된 프로듀서 스레드에서 호출됩니다.</summary>
     public Action<StallInfo>? OnStall { get; init; }
+
+    /// <summary>
+    /// 스톨 보고 최소 간격. 지속 정체에서 로그가 폭주하는 것을 막습니다.
+    /// </summary>
+    /// <remarks>
+    /// 이것이 없으면 모든 게시가 임계치만큼 막히는 상황에서 <b>게시 건수만큼</b> 콜백이 발동합니다.
+    /// 콜백이 로거라면 초당 수천 줄의 로그가 정체를 더 악화시킵니다.
+    /// </remarks>
+    public TimeSpan StallReportInterval { get; init; } = TimeSpan.FromSeconds(1);
 
     /// <summary>
     /// DEBUG 빌드에서 <c>ProducerType.Single</c> 오용(여러 스레드가 게시)을 검사할지 여부.

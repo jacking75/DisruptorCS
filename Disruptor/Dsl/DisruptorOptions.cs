@@ -30,6 +30,9 @@ public sealed record DisruptorOptions
     /// <summary>스톨 감지 콜백. 어느 핸들러가 병목인지 알려줍니다.</summary>
     public Action<StallInfo>? OnStall { get; init; }
 
+    /// <inheritdoc cref="SequencerOptions.StallReportInterval"/>
+    public TimeSpan StallReportInterval { get; init; } = TimeSpan.FromSeconds(1);
+
     /// <summary>종료 시 미처리 이벤트를 드레인할 최대 시간.</summary>
     public TimeSpan ShutdownTimeout { get; init; } = TimeSpan.FromSeconds(5);
 
@@ -46,6 +49,18 @@ public sealed record DisruptorOptions
 
     /// <summary>DEBUG 빌드에서 ProducerType.Single 오용을 검사할지 여부.</summary>
     public bool ValidateSingleProducerThread { get; init; } = true;
+
+    /// <summary>
+    /// 한 번에 처리할 최대 이벤트 수. 모든 프로세서에 적용됩니다. 기본값은 무제한입니다.
+    /// </summary>
+    /// <inheritdoc cref="BatchEventProcessor{T}.MaxBatchSize" path="/remarks"/>
+    public int MaxBatchSize { get; init; } = int.MaxValue;
+
+    /// <summary>
+    /// 배치 메트릭 샘플링 주기. N 이면 N 배치당 1회만 기록하고 값을 N 배로 보정합니다.
+    /// 초고빈도 파이프라인에서 메트릭의 상시 비용을 낮춥니다.
+    /// </summary>
+    public int MetricsBatchSampling { get; init; } = 1;
 
     internal IWaitStrategy CreateDefaultWaitStrategy() => DefaultWaitStrategyFactory();
 

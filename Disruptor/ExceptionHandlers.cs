@@ -25,9 +25,17 @@ public sealed class ResilientExceptionHandler<T> : IExceptionHandler<T>
         _maxConsecutiveFailures = maxConsecutiveFailures;
     }
 
-    /// <summary>표준 오류(stderr)에 기록하는 기본 인스턴스.</summary>
-    public static ResilientExceptionHandler<T> Default { get; } =
-        new((ex, seq, evt) => Console.Error.WriteLine(
+    /// <summary>
+    /// 표준 오류(stderr)에 기록하는 프로세서 전용 기본 핸들러를 만듭니다.
+    /// </summary>
+    /// <remarks>
+    /// <b>인스턴스를 공유하면 안 됩니다.</b> 연속 실패 스트릭(<c>_consecutive</c>)이 인스턴스 상태이므로,
+    /// 여러 프로세서가 하나를 공유하면 (a) 다른 프로세서의 성공이 실패 스트릭을 리셋해
+    /// 무한 오류 루프 감지가 영영 발동하지 않거나, (b) 서로 다른 파이프라인의 실패가 합산되어
+    /// 엉뚱한 프로세서에서 Halt 가 반환됩니다. 그래서 싱글턴 프로퍼티가 아니라 팩토리입니다.
+    /// </remarks>
+    public static ResilientExceptionHandler<T> CreateDefault()
+        => new(static (ex, seq, evt) => Console.Error.WriteLine(
             $"[Disruptor][ERROR] seq={seq} event={evt}: {ex}"));
 
     /// <summary>지금까지 관측된 연속 실패 횟수.</summary>

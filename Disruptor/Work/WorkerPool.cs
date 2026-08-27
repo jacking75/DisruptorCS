@@ -56,7 +56,7 @@ public sealed class WorkerPool<T> : IDisposable where T : class
     public void SetMetrics(DisruptorMetrics? metrics)
     {
         foreach (var p in _processors)
-            p.Metrics = metrics;
+            p.Recorder = metrics?.CreateRecorder(p.Name);
     }
 
     /// <summary>
@@ -99,12 +99,15 @@ public sealed class WorkerPool<T> : IDisposable where T : class
         long cursor = _ringBuffer.Cursor;
         long deadline = Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
 
+        // Thread.Sleep(1) 금지 — DisruptorBase.DrainProcessors 와 같은 이유.
+        var spin = new SpinWait();
+
         while (Stopwatch.GetTimestamp() < deadline)
         {
             if (_workSequence.Value >= cursor && AllWorkersIdle(cursor))
                 break;
 
-            Thread.Sleep(1);
+            spin.SpinOnce(sleep1Threshold: -1);
         }
 
         Halt();

@@ -19,11 +19,15 @@ public sealed class RingBuffer<T> : IRingBufferCore where T : class
     private readonly int _indexMask;
     private readonly ISequencer _sequencer;
 
+    // 게시 경로에서 인터페이스 디스패치를 제거한다 (SequencerDispatcher 주석 참조).
+    private readonly SequencerDispatcher _dispatcher;
+
     private RingBuffer(ISequencer sequencer, Func<T> eventFactory)
     {
         ArgumentNullException.ThrowIfNull(eventFactory);
 
         _sequencer = sequencer;
+        _dispatcher = new SequencerDispatcher(sequencer);
         _indexMask = sequencer.BufferSize - 1;
 
         // 이벤트 미리 할당
@@ -77,55 +81,118 @@ public sealed class RingBuffer<T> : IRingBufferCore where T : class
 
     /// <summary>다음 시퀀스를 할당받습니다. 용량이 없으면 대기합니다.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public long Next(int n = 1) => _sequencer.Next(n);
+    public long Next(int n = 1) => n == 1 ? _dispatcher.Next() : _dispatcher.Next(n);
 
     /// <summary>다음 시퀀스를 할당받습니다. 취소 시 <see cref="OperationCanceledException"/>을 던집니다.</summary>
-    public long Next(CancellationToken cancellationToken) => _sequencer.Next(1, cancellationToken);
+    public long Next(CancellationToken cancellationToken) => _dispatcher.Next(1, cancellationToken);
 
     /// <summary>다음 시퀀스를 할당받습니다. 취소 시 <see cref="OperationCanceledException"/>을 던집니다.</summary>
-    public long Next(int n, CancellationToken cancellationToken) => _sequencer.Next(n, cancellationToken);
+    public long Next(int n, CancellationToken cancellationToken) => _dispatcher.Next(n, cancellationToken);
 
     /// <summary>Non-blocking 시퀀스 할당 시도.</summary>
-    public bool TryNext(out long sequence, int n = 1) => _sequencer.TryNext(out sequence, n);
+    public bool TryNext(out long sequence, int n = 1) => _dispatcher.TryNext(out sequence, n);
 
     /// <summary>타임아웃까지 시퀀스 할당을 시도합니다.</summary>
-    public bool TryNext(out long sequence, TimeSpan timeout) => _sequencer.TryNext(out sequence, 1, timeout);
+    public bool TryNext(out long sequence, TimeSpan timeout) => _dispatcher.TryNext(out sequence, 1, timeout);
 
     /// <summary>타임아웃까지 시퀀스 할당을 시도합니다.</summary>
-    public bool TryNext(out long sequence, int n, TimeSpan timeout) => _sequencer.TryNext(out sequence, n, timeout);
+    public bool TryNext(out long sequence, int n, TimeSpan timeout) => _dispatcher.TryNext(out sequence, n, timeout);
 
     /// <summary>시퀀스를 게시합니다.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Publish(long sequence) => _sequencer.Publish(sequence);
+    public void Publish(long sequence) => _dispatcher.Publish(sequence);
 
     /// <summary>범위를 게시합니다.</summary>
-    public void Publish(long lo, long hi) => _sequencer.Publish(lo, hi);
+    public void Publish(long lo, long hi) => _dispatcher.Publish(lo, hi);
+
+    /// <summary>
+    /// 연속된 슬롯 조각을 span 으로 노출합니다. 랩 경계를 넘지 않는 범위여야 합니다.
+    /// </summary>
+    /// <remarks>호출자(<see cref="BatchEventProcessor{T}"/>)가 랩 분할을 보장합니다.</remarks>
+    internal ReadOnlySpan<T> GetSegment(long startSequence, long endSequenceInclusive)
+    {
+        int startIndex = (int)startSequence & _indexMask;
+        int length = (int)(endSequenceInclusive - startSequence + 1);
+        return new ReadOnlySpan<T>(_entries, startIndex, length);
+    }
+
+    /// <summary>
+    /// 전용 스레드 없이 호출자의 스레드에서 이벤트를 당겨 처리하는 폴러를 만듭니다.
+    /// </summary>
+    /// <remarks>
+    /// 게임 메인 루프 · Unity <c>Update()</c> · 기존 프레임 루프와의 통합 지점입니다.
+    /// "Disruptor 를 쓰려면 스레드 모델을 바꿔야 한다"는 제약이 사라집니다.
+    /// </remarks>
+    /// <param name="dependentSequences">
+    /// 이 폴러가 기다릴 상위 핸들러 시퀀스. 비우면 프로듀서 커서를 직접 따라갑니다.
+    /// </param>
+    public EventPoller<T> NewPoller(params Sequence[] dependentSequences)
+        => new(this, CursorSequence, dependentSequences ?? []);
 
     /// <summary>이벤트를 게시합니다 (translator 패턴).</summary>
+    /// <remarks>
+    /// <b>캡처하는 람다를 넘기지 마세요.</b> 게시마다 클로저와 델리게이트가 할당되어
+    /// "정상 경로 할당 0" 계약이 깨집니다. <c>static</c> 람다 + <see cref="PublishEvent{TArg}"/>
+    /// 오버로드나, 할당이 전혀 없는
+    /// <see cref="PublishEvent{TTranslator, TArg}(TTranslator, TArg)"/>를 사용하세요.
+    /// <code>
+    /// // 나쁨: i 를 캡처 -> 게시마다 할당
+    /// ring.PublishEvent((evt, seq) => evt.Id = i);
+    /// // 좋음: static 람다 + 인자 전달
+    /// ring.PublishEvent(static (evt, seq, id) => evt.Id = id, i);
+    /// </code>
+    /// </remarks>
     public void PublishEvent(Action<T, long> translator)
     {
-        long sequence = _sequencer.Next();
+        long sequence = _dispatcher.Next();
         try
         {
             translator(this[sequence], sequence);
         }
         finally
         {
-            _sequencer.Publish(sequence);
+            _dispatcher.Publish(sequence);
         }
     }
 
     /// <summary>인자와 함께 이벤트를 게시합니다.</summary>
     public void PublishEvent<TArg>(Action<T, long, TArg> translator, TArg arg)
     {
-        long sequence = _sequencer.Next();
+        long sequence = _dispatcher.Next();
         try
         {
             translator(this[sequence], sequence, arg);
         }
         finally
         {
-            _sequencer.Publish(sequence);
+            _dispatcher.Publish(sequence);
+        }
+    }
+
+    /// <summary>
+    /// 할당이 전혀 없는 게시. <typeparamref name="TTranslator"/>가 struct 이므로
+    /// 델리게이트도 클로저도 만들어지지 않고 <c>Translate</c> 가 인라인됩니다.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// readonly struct FillOrder : IEventTranslator&lt;OrderEvent, long&gt;
+    /// {
+    ///     public void Translate(OrderEvent evt, long sequence, long id) => evt.OrderId = id;
+    /// }
+    /// ring.PublishEvent(default(FillOrder), orderId);
+    /// </code>
+    /// </example>
+    public void PublishEvent<TTranslator, TArg>(TTranslator translator, TArg arg)
+        where TTranslator : struct, IEventTranslator<T, TArg>
+    {
+        long sequence = _dispatcher.Next();
+        try
+        {
+            translator.Translate(this[sequence], sequence, arg);
+        }
+        finally
+        {
+            _dispatcher.Publish(sequence);
         }
     }
 
@@ -135,7 +202,7 @@ public sealed class RingBuffer<T> : IRingBufferCore where T : class
         if (args.Length == 0)
             return;
 
-        long hi = _sequencer.Next(args.Length);
+        long hi = _dispatcher.Next(args.Length);
         long lo = hi - args.Length + 1;
         try
         {
@@ -144,20 +211,20 @@ public sealed class RingBuffer<T> : IRingBufferCore where T : class
         }
         finally
         {
-            _sequencer.Publish(lo, hi);
+            _dispatcher.Publish(lo, hi);
         }
     }
 
     /// <summary>RAII 스타일 이벤트 게시 (using 패턴).</summary>
     public EventScope PublishEventScope()
     {
-        long sequence = _sequencer.Next();
+        long sequence = _dispatcher.Next();
         return new EventScope(this, sequence);
     }
 
     /// <summary>RAII 스타일 이벤트 게시 시도. 실패하면 <see cref="EventScope.IsValid"/>가 false입니다.</summary>
     public EventScope TryPublishEventScope(TimeSpan timeout)
-        => _sequencer.TryNext(out long sequence, 1, timeout)
+        => _dispatcher.TryNext(out long sequence, 1, timeout)
             ? new EventScope(this, sequence)
             : default;
 
@@ -204,9 +271,12 @@ public sealed class RingBuffer<T> : IRingBufferCore where T : class
     public bool IsPublished(long sequence) => _sequencer.IsAvailable(sequence);
 
     public long GetHighestPublishedSequence(long lowerBound, long availableSequence)
-        => _sequencer.GetHighestPublishedSequence(lowerBound, availableSequence);
+        => _dispatcher.GetHighestPublishedSequence(lowerBound, availableSequence);
 
     internal ISequencer Sequencer => _sequencer;
+
+    /// <summary>프로듀서 커서 시퀀스 객체. 폴러/배리어 구성에 사용합니다.</summary>
+    internal Sequence CursorSequence => _sequencer.CursorSequence;
 
     /// <summary>
     /// RAII 스타일 이벤트 게시를 위한 구조체. using과 함께 사용합니다.

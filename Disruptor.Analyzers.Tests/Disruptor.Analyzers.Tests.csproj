@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+
+    <!-- 분석기를 실제 컴파일에 붙여 돌리기 위해 Roslyn 을 직접 참조한다. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Analyzer 자체를 일반 참조로 가져와 직접 인스턴스화해 테스트한다. -->
+    <ProjectReference Include="../Disruptor.Analyzers/Disruptor.Analyzers.csproj"
+                      OutputItemType="" ReferenceOutputAssembly="true" />
+    <!-- 테스트 소스가 참조할 실제 Disruptor 타입 -->
+    <ProjectReference Include="../Disruptor/Disruptor.csproj" />
+  </ItemGroup>
+
+</Project>

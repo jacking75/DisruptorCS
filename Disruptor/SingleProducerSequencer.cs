@@ -28,6 +28,39 @@ public sealed class SingleProducerSequencer : SequencerBase
 
     public override long Next(int n = 1) => Next(n, CancellationToken.None);
 
+    /// <summary>
+    /// n == 1 전용 fast path. 인자 검증과 취소 토큰 처리를 생략해 게시 경로를 최대한 얇게 유지합니다.
+    /// </summary>
+    /// <remarks>
+    /// 이벤트마다 호출되는 가장 뜨거운 경로이므로 <see cref="SequencerDispatcher"/> 가 이 오버로드를
+    /// 직접 호출합니다. 클래스가 sealed 라 JIT 가 직접 호출로 바꾸고 인라인할 수 있습니다.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal long NextOne()
+    {
+        AssertSingleProducerThread();
+
+        long nextValue = _nextValue;
+        long nextSequence = nextValue + 1;
+        long wrapPoint = nextSequence - BufferSizeValue;
+        long cachedGatingSequence = _cachedGatingValue;
+
+        if (wrapPoint > cachedGatingSequence || cachedGatingSequence > nextValue)
+        {
+            // 캐시가 낡았을 뿐 실제로는 용량이 있는 경우가 압도적으로 많다 (컨슈머가 계속 전진하므로).
+            // 그 경로를 여기서 인라인으로 끝내고, 진짜로 기다려야 할 때만 느린 경로로 넘어간다.
+            long min = SequenceGroups.GetMinimumSequence(GatingSequences, nextValue);
+
+            if (wrapPoint > min)
+                min = WaitForCapacity(wrapPoint, nextValue, CancellationToken.None);
+
+            _cachedGatingValue = min;
+        }
+
+        _nextValue = nextSequence;
+        return nextSequence;
+    }
+
     public override long Next(int n, CancellationToken cancellationToken)
     {
         ValidateClaimCount(n);
@@ -50,9 +83,16 @@ public sealed class SingleProducerSequencer : SequencerBase
 
     private long WaitForCapacity(long wrapPoint, long nextValue, CancellationToken cancellationToken)
     {
+        // 진단도 시간 기반 백오프도 필요 없는 기본 구성에서는 가장 얇은 루프를 돈다:
+        // slowest 추적 없음, 시간 측정 없음, 백오프 인터페이스 호출 없음.
+        if (UsesSpinOnlyBackoff && !TimeSensitive)
+            return WaitForCapacityFast(wrapPoint, nextValue, cancellationToken);
+
         var backoff = Options.Backoff;
         ProducerBackoffState state = default;
-        long start = Stopwatch.GetTimestamp();
+        long start = 0;
+        long elapsed = 0;
+        int spinCount = 0;
         bool stallReported = false;
 
         long minSequence;
@@ -62,13 +102,34 @@ public sealed class SingleProducerSequencer : SequencerBase
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            long elapsed = Stopwatch.GetTimestamp() - start;
-            ReportStallIfNeeded(elapsed, ref stallReported, minSequence, slowest);
+            // §2.4: 시간을 실제로 쓰는 구성에서만, 그것도 128회에 1번만 QPC 를 읽는다.
+            if (TimeSensitive && (++spinCount & TimeSampleMask) == 0)
+            {
+                if (start == 0)
+                    start = Stopwatch.GetTimestamp();
+
+                elapsed = Stopwatch.GetTimestamp() - start;
+                ReportStallIfNeeded(elapsed, ref stallReported, minSequence, slowest);
+            }
 
             if (!backoff.Wait(ref state, elapsed))
                 throw new TimeoutException(
                     $"Disruptor '{Options.PipelineName}': 백프레셔 대기 시간이 초과되었습니다 " +
                     $"(가장 느린 시퀀스 {minSequence}, 커서 {Cursor}).");
+        }
+
+        return minSequence;
+    }
+
+    private long WaitForCapacityFast(long wrapPoint, long nextValue, CancellationToken cancellationToken)
+    {
+        ProducerBackoffState state = default;
+        long minSequence;
+
+        while (wrapPoint > (minSequence = SequenceGroups.GetMinimumSequence(GatingSequences, nextValue)))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            state.SpinOnceWithoutSleep();
         }
 
         return minSequence;

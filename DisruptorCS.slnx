@@ -1,5 +1,12 @@
 <Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/GameLoopPoller/GameLoopPoller.csproj" />
+  </Folder>
+  <Project Path="Disruptor.Analyzers.Tests/Disruptor.Analyzers.Tests.csproj" />
+  <Project Path="Disruptor.Analyzers/Disruptor.Analyzers.csproj" />
   <Project Path="Disruptor.Benchmarks/Disruptor.Benchmarks.csproj" />
+  <Project Path="Disruptor.Extensions.Hosting/Disruptor.Extensions.Hosting.csproj" />
+  <Project Path="Disruptor.Soak/Disruptor.Soak.csproj" />
   <Project Path="Disruptor.Tests/Disruptor.Tests.csproj" />
   <Project Path="Disruptor/Disruptor.csproj" />
   <Project Path="Example/Example.csproj" />

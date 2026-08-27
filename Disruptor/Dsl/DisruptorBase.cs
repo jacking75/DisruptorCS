@@ -17,10 +17,11 @@ public abstract class DisruptorBase : IDisposable
         ShutdownSource = new CancellationTokenSource();
 
         if (options.EnableMetrics)
-            Metrics = new DisruptorMetrics(options.Name);
+            Metrics = new DisruptorMetrics(options.Name, options.MetricsBatchSampling);
     }
 
-    protected DisruptorOptions Options { get; }
+    /// <summary>이 파이프라인의 옵션.</summary>
+    public DisruptorOptions Options { get; }
 
     protected CancellationTokenSource ShutdownSource { get; }
 
@@ -186,12 +187,17 @@ public abstract class DisruptorBase : IDisposable
         // 다중 프로듀서에서 커서는 "점유" 최대치이므로, 실제로 연속 게시된 상한을 목표로 삼는다.
         long target = Core.GetHighestPublishedSequence(start + 1, cursor);
 
+        // Thread.Sleep(1) 을 쓰지 않는다. Windows 기본 타이머 분해능(15.6ms) 때문에
+        // "곧 끝날 드레인"에도 최소 15ms 가 붙는다 — 라이브러리의 다른 모든 대기 경로와 같은 규칙이다.
+        // 대부분의 드레인은 마이크로초 단위로 끝나므로 스핀이 압도적으로 유리하다.
+        var spin = new SpinWait();
+
         while (Stopwatch.GetTimestamp() < deadline)
         {
             if (MinimumProcessorSequence() >= target)
                 return;
 
-            Thread.Sleep(1);
+            spin.SpinOnce(sleep1Threshold: -1);
         }
 
         Console.Error.WriteLine(

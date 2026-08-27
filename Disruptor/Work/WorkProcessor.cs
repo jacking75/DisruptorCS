@@ -32,7 +32,7 @@ public sealed class WorkProcessor<T> : IEventProcessor, IDisposable where T : cl
         _barrier = sequenceBarrier;
         _handler = workHandler;
         _workSequence = workSequence;
-        _exceptionHandler = ResilientExceptionHandler<T>.Default;
+        _exceptionHandler = ResilientExceptionHandler<T>.CreateDefault();
         Name = name ?? workHandler.GetType().Name;
 
         HandlerValidation.AssertNotAsync(workHandler, nameof(IWorkHandler<T>.OnEvent));
@@ -44,7 +44,10 @@ public sealed class WorkProcessor<T> : IEventProcessor, IDisposable where T : cl
 
     public bool IsRunning => _running == 1;
 
-    public DisruptorMetrics? Metrics { get; set; }
+    public HandlerRecorder? Recorder { get; set; }
+
+    /// <summary>Dispose 이후 Halt 를 호출해도 안전하도록 하는 가드.</summary>
+    private int _disposed;
 
     public event Action<IEventProcessor, Exception?>? Halted;
 
@@ -56,6 +59,8 @@ public sealed class WorkProcessor<T> : IEventProcessor, IDisposable where T : cl
 
     public void Run(CancellationToken cancellationToken, CountdownEvent? startedGate = null)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+
         if (Interlocked.Exchange(ref _running, 1) != 0)
         {
             startedGate?.Signal();
@@ -63,7 +68,7 @@ public sealed class WorkProcessor<T> : IEventProcessor, IDisposable where T : cl
         }
 
         using var registration = cancellationToken.CanBeCanceled
-            ? cancellationToken.Register(static s => ((CancellationTokenSource)s!).Cancel(), _halt)
+            ? cancellationToken.Register(static s => TryCancel((CancellationTokenSource)s!), _halt)
             : default;
 
         bool signalled = false;
@@ -136,11 +141,11 @@ public sealed class WorkProcessor<T> : IEventProcessor, IDisposable where T : cl
                     _handler.OnEvent(@event);
                     _exceptionHandler.OnEventProcessed();
                     needsNewClaim = true;
-                    Metrics?.RecordProcessed(Name, 1);
+                    Recorder?.OnBatchCompleted(1);
                 }
                 catch (Exception ex)
                 {
-                    Metrics?.RecordHandlerError(Name);
+                    Recorder?.OnHandlerError();
 
                     switch (SafeHandleException(ex, nextSequence, @event))
                     {
@@ -207,11 +212,31 @@ public sealed class WorkProcessor<T> : IEventProcessor, IDisposable where T : cl
 
     public void Halt()
     {
-        if (!_halt.IsCancellationRequested)
-            _halt.Cancel();
+        if (Volatile.Read(ref _disposed) != 0)
+            return;
 
+        TryCancel(_halt);
         _barrier.WaitStrategy.SignalAllWhenBlocking();
     }
 
-    public void Dispose() => _halt.Dispose();
+    private static void TryCancel(CancellationTokenSource cts)
+    {
+        try
+        {
+            if (!cts.IsCancellationRequested)
+                cts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Dispose 와의 경쟁 창. 이미 정리된 상태이므로 무시해도 안전하다.
+        }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
+        _halt.Dispose();
+    }
 }

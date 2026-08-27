@@ -41,6 +41,8 @@ public sealed class MultiProducerSequencer : SequencerBase
         var backoff = Options.Backoff;
         ProducerBackoffState state = default;
         long start = 0;
+        long elapsed = 0;
+        int spinCount = 0;
         bool stallReported = false;
 
         while (true)
@@ -58,11 +60,23 @@ public sealed class MultiProducerSequencer : SequencerBase
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    if (start == 0)
-                        start = Stopwatch.GetTimestamp();
+                    // 기본 구성(스핀 전용 백오프 + 진단 없음)에서는 시간 측정과 인터페이스 호출을 생략한다.
+                    if (UsesSpinOnlyBackoff && !TimeSensitive)
+                    {
+                        state.SpinOnceWithoutSleep();
+                        continue;
+                    }
 
-                    long elapsed = Stopwatch.GetTimestamp() - start;
-                    ReportStallIfNeeded(elapsed, ref stallReported, gatingSequence, slowest);
+                    // §2.4: 시간을 실제로 쓰는 구성에서만, 그것도 128회에 1번만 QPC 를 읽는다.
+                    // 짧은 백프레셔(몇 번의 스핀으로 해소)에서 QPC 왕복이 해소 지연에 얹히는 것을 막는다.
+                    if (TimeSensitive && (++spinCount & TimeSampleMask) == 0)
+                    {
+                        if (start == 0)
+                            start = Stopwatch.GetTimestamp();
+
+                        elapsed = Stopwatch.GetTimestamp() - start;
+                        ReportStallIfNeeded(elapsed, ref stallReported, gatingSequence, slowest);
+                    }
 
                     if (!backoff.Wait(ref state, elapsed))
                         throw new TimeoutException(

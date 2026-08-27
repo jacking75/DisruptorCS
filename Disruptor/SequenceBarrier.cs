@@ -4,7 +4,7 @@ namespace Disruptor;
 
 public sealed class SequenceBarrier : ISequenceBarrier
 {
-    private readonly ISequencer _sequencer;
+    private readonly SequencerDispatcher _dispatcher;
     private readonly IWaitStrategy _waitStrategy;
     private readonly Sequence _cursorSequence;
     private readonly DependentSequenceGroup _dependents;
@@ -16,7 +16,7 @@ public sealed class SequenceBarrier : ISequenceBarrier
         ArgumentNullException.ThrowIfNull(waitStrategy);
         ArgumentNullException.ThrowIfNull(cursorSequence);
 
-        _sequencer = sequencer;
+        _dispatcher = new SequencerDispatcher(sequencer);
         _waitStrategy = waitStrategy;
         _cursorSequence = cursorSequence;
         _dependents = new DependentSequenceGroup(cursorSequence, dependentSequences ?? []);
@@ -47,6 +47,6 @@ public sealed class SequenceBarrier : ISequenceBarrier
 
         // Multi-producer 안전: 연속적으로 게시된 최고 시퀀스만 반환
         // (Single-producer에서는 availableSequence를 그대로 반환하므로 오버헤드 없음)
-        return _sequencer.GetHighestPublishedSequence(sequence, available);
+        return _dispatcher.GetHighestPublishedSequence(sequence, available);
     }
 }

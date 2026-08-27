@@ -10,10 +10,20 @@ using Disruptor.Work;
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 Console.WriteLine("=== DisruptorCS — 게임 서버 예제 ===\n");
 
+// 유휴 구간에도 틱 정밀도를 유지한다 (Windows 기본 타이머는 15.6ms 로 양자화됨).
+using var timerScope = new HighResolutionTimerScope();
+Console.WriteLine($"고분해능 타이머: {(timerScope.IsActive ? "활성 (유휴 OnTimeout 약 1.5ms)" : "비활성 (Windows 아님)")}\n");
+
 BasicExample();
 Console.WriteLine();
 
 DependencyGraphExample();
+Console.WriteLine();
+
+BatchHandlerExample();
+Console.WriteLine();
+
+EventPollerExample();
 Console.WriteLine();
 
 BackpressurePolicyExample();
@@ -23,6 +33,9 @@ TickLoopExample();
 Console.WriteLine();
 
 JournalReplayExample();
+Console.WriteLine();
+
+JournalIntegrityExample();
 Console.WriteLine();
 
 ShardedRoomExample();
@@ -75,23 +88,26 @@ void BasicExample()
         }
     }
 
-    // 방법 2: Lambda 패턴
-    ringBuffer.PublishEvent((evt, seq) =>
+    // 방법 2: static 람다 + 인자 (캡처하지 않으므로 할당 0)
+    ringBuffer.PublishEvent(static (evt, seq, id) =>
     {
-        evt.OrderId = 999;
+        evt.OrderId = id;
         evt.Symbol = "GOOG";
         evt.Price = 2800.0;
         evt.Quantity = 50;
-    });
+    }, 999L);
 
-    // 방법 3: using 스코프 패턴 — try/finally 를 잊어 링 버퍼를 막는 사고를 구조적으로 방지
+    // 방법 3: 구조체 translator (델리게이트조차 만들지 않음)
+    ringBuffer.PublishEvent(default(FillMsftOrder), 1000L);
+
+    // 방법 4: using 스코프 — try/finally 를 잊어 링 버퍼를 막는 사고를 구조적으로 방지
     using (var scope = ringBuffer.PublishEventScope())
     {
         var evt = scope.Event();
-        evt.OrderId = 1000;
-        evt.Symbol = "MSFT";
-        evt.Price = 300.0;
-        evt.Quantity = 200;
+        evt.OrderId = 1001;
+        evt.Symbol = "NVDA";
+        evt.Price = 900.0;
+        evt.Quantity = 10;
     }
 
     // Shutdown 이 미처리 이벤트를 드레인하므로 Thread.Sleep 이 필요 없다.
@@ -120,8 +136,10 @@ void DependencyGraphExample()
     var replicationHandler = new ReplicationHandler();
     var businessHandler = new BusinessLogicHandler();
 
-    disruptor.HandleEventsWith(journalHandler, replicationHandler)
-             .Then(businessHandler);
+    // 따로 등록한 두 그룹을 And() 로 합쳐 "양쪽 모두" 기다리게 할 수도 있다.
+    var journal = disruptor.HandleEventsWith(journalHandler);
+    var replication = disruptor.HandleEventsWith(replicationHandler);
+    journal.And(replication).Then(businessHandler);
 
     var ringBuffer = disruptor.Start();
 
@@ -145,18 +163,109 @@ void DependencyGraphExample()
 
     disruptor.Shutdown(TimeSpan.FromSeconds(10));
 
-    Console.WriteLine($"  Journal     : {journalHandler.Count:N0}건");
-    Console.WriteLine($"  Replication : {replicationHandler.Count:N0}건");
+    Console.WriteLine($"  Journal      : {journalHandler.Count:N0}건");
+    Console.WriteLine($"  Replication  : {replicationHandler.Count:N0}건");
     Console.WriteLine($"  BusinessLogic: {businessHandler.Count:N0}건 (최대 배치 {businessHandler.MaxBatch:N0})");
-    Console.WriteLine(businessHandler.Count == eventCount ? "  → 유실 없음" : "  → 유실 발생!");
+    Console.WriteLine(businessHandler.Count == eventCount
+        ? "  → 유실 없음. And() 로 두 그룹을 합쳐 양쪽을 모두 기다렸다"
+        : "  → 유실 발생!");
 }
 
 // =====================================================
-// 예제 3: 백프레셔 정책 — 게임 서버는 "버리는 것"도 정책이다
+// 예제 3: 배치 핸들러 — 이벤트 구간을 span 으로 통째로 받는다
+// =====================================================
+void BatchHandlerExample()
+{
+    Console.WriteLine("--- 예제 3: 배치 핸들러 (span 수신) ---");
+
+    const int count = 200_000;
+    var handler = new SpanSumHandler();
+
+    using var disruptor = new Disruptor<OrderEvent>(
+        () => new OrderEvent(), 4096, ProducerType.Single, new YieldingWaitStrategy(),
+        new DisruptorOptions { Name = "batch", AutoClearSlots = false });
+
+    disruptor.HandleEventsWith(handler);
+    var ring = disruptor.Start();
+
+    for (int i = 0; i < count; i++)
+    {
+        long seq = ring.Next();
+        ring[seq].OrderId = i;
+        ring.Publish(seq);
+    }
+
+    disruptor.Shutdown(TimeSpan.FromSeconds(10));
+
+    Console.WriteLine($"  이벤트 {handler.Events:N0}건을 OnBatch 호출 {handler.BatchCalls:N0}회로 처리");
+    Console.WriteLine($"  최대 조각 길이: {handler.MaxSegment:N0}, 합계 검증: {(handler.Sum == SumTo(count - 1) ? "일치" : "불일치")}");
+    Console.WriteLine("  → 호출 경계가 이벤트당 1회에서 조각당 1회로 줄어든다 (SIMD·일괄 직렬화 가능)");
+
+    static long SumTo(long n) => n * (n + 1) / 2;
+}
+
+// =====================================================
+// 예제 4: EventPoller — 전용 스레드 없이 기존 루프에서 소비
+// =====================================================
+void EventPollerExample()
+{
+    Console.WriteLine("--- 예제 4: EventPoller (스레드 0개 추가) ---");
+
+    const int count = 100_000;
+    const int frameBudget = 256;
+
+    var ring = RingBuffer<OrderEvent>.CreateSingleProducer(
+        () => new OrderEvent(), 4096, new YieldingWaitStrategy());
+
+    using var poller = ring.NewPoller();
+
+    int published = 0;
+    int consumed = 0;
+    int frames = 0;
+    long checksum = 0;
+
+    var sw = Stopwatch.StartNew();
+
+    // 기존 게임 루프 그대로 — 소비 전용 스레드를 만들지 않는다.
+    //
+    // 주의: 폴러는 이 스레드가 Poll() 을 호출할 때만 소비한다. 따라서 한 프레임에
+    // 소비량보다 많이 게시하면 링이 차고 Next() 가 영구 대기한다 (자기 자신을 기다리는 셈).
+    // 프레임당 게시량 <= 프레임당 소비 예산으로 잡거나, TryNext 로 게시를 제한해야 한다.
+    while (consumed < count)
+    {
+        for (int i = 0; i < frameBudget && published < count; i++)
+        {
+            if (!ring.TryNext(out long seq))
+                break;   // 이번 프레임 예산 소진 — 다음 프레임에 이어서
+
+            ring[seq].OrderId = published++;
+            ring.Publish(seq);
+        }
+
+        poller.Poll((evt, seq, endOfBatch) =>
+        {
+            checksum += evt.OrderId;
+            consumed++;
+            return true;
+        }, maxEvents: frameBudget);
+
+        frames++;
+    }
+
+    sw.Stop();
+
+    Console.WriteLine($"  이벤트 {consumed:N0}건 / 프레임 {frames:N0}회 / {sw.Elapsed.TotalMilliseconds:F0}ms");
+    Console.WriteLine($"  프레임당 최대 {frameBudget}건 — 밀린 이벤트가 한 프레임을 독점하지 않는다");
+    Console.WriteLine($"  체크섬: {(checksum == (long)(count - 1) * count / 2 ? "일치" : "불일치")}");
+    Console.WriteLine("  → Unity Update() / 자체 프레임 루프에 스레드 모델 변경 없이 통합된다");
+}
+
+// =====================================================
+// 예제 5: 백프레셔 정책 — 게임 서버는 "버리는 것"도 정책이다
 // =====================================================
 void BackpressurePolicyExample()
 {
-    Console.WriteLine("--- 예제 3: 백프레셔 정책 ---");
+    Console.WriteLine("--- 예제 5: 백프레셔 정책 ---");
 
     using var disruptor = new Disruptor<OrderEvent>(
         () => new OrderEvent(), 256, ProducerType.Multi, new YieldingWaitStrategy(),
@@ -169,13 +278,15 @@ void BackpressurePolicyExample()
 
     // 이동 패킷처럼 "최신값만 의미 있는" 이벤트 — 혼잡하면 버린다
     for (int i = 0; i < 2_000; i++)
-        gate.TryPublish(BackpressurePolicy.DropWhenCongested, (e, s) => e.OrderId = i, opCode: 10);
+        gate.TryPublish(BackpressurePolicy.DropWhenCongested,
+                        static (e, s) => e.OrderId = s, opCode: 10);
 
     // 결제처럼 "절대 버릴 수 없는" 이벤트 — 타임아웃 후 거절해 호출자가 오류 응답
     int rejected = 0;
     for (int i = 0; i < 200; i++)
     {
-        if (!gate.TryPublish(BackpressurePolicy.FailAfterTimeout, (e, s) => e.OrderId = i,
+        if (!gate.TryPublish(BackpressurePolicy.FailAfterTimeout,
+                             static (e, s) => e.OrderId = s,
                              opCode: 20, timeout: TimeSpan.FromMilliseconds(5)))
             rejected++;
     }
@@ -187,11 +298,11 @@ void BackpressurePolicyExample()
 }
 
 // =====================================================
-// 예제 4: 틱 기반 게임 루프 — 이벤트 소비와 시뮬레이션을 한 스레드에서
+// 예제 6: 틱 기반 게임 루프 — 이벤트 소비와 시뮬레이션을 한 스레드에서
 // =====================================================
 void TickLoopExample()
 {
-    Console.WriteLine("--- 예제 4: 60Hz 틱 루프 통합 ---");
+    Console.WriteLine("--- 예제 6: 60Hz 틱 루프 통합 ---");
 
     var handler = new TickedRoomHandler();
 
@@ -229,11 +340,11 @@ void TickLoopExample()
 }
 
 // =====================================================
-// 예제 5: 결정론적 저널 + 리플레이
+// 예제 7: 결정론적 저널 + 리플레이
 // =====================================================
 void JournalReplayExample()
 {
-    Console.WriteLine("--- 예제 5: 결정론적 저널 / 리플레이 ---");
+    Console.WriteLine("--- 예제 7: 결정론적 저널 / 리플레이 ---");
 
     const int eventCount = 20_000;
     string path = Path.Combine(Path.GetTempPath(), $"disruptorcs-demo-{Environment.ProcessId}.journal");
@@ -287,11 +398,62 @@ void JournalReplayExample()
 }
 
 // =====================================================
-// 예제 6: 샤딩 — 수천 룸을 코어 수만큼의 스레드로
+// 예제 8: 저널 무결성 — 손상된 파일은 조용히 재생되면 안 된다
+// =====================================================
+void JournalIntegrityExample()
+{
+    Console.WriteLine("--- 예제 8: 저널 무결성 검증 ---");
+
+    var codec = new OrderEventCodec();
+    using var stream = new MemoryStream();
+
+    using (var writer = new JournalWriter(stream, ownsStream: false))
+    {
+        var evt = new OrderEvent();
+        Span<byte> buf = stackalloc byte[16];
+
+        for (int i = 0; i < 1_000; i++)
+        {
+            evt.OrderId = i;
+            evt.RoomId = i % 8;
+            evt.Quantity = i;
+            int n = codec.Serialize(evt, buf);
+            writer.Write(i, buf[..n]);
+        }
+
+        writer.Flush();
+    }
+
+    byte[] healthy = stream.ToArray();
+
+    using (var ok = new MemoryStream(healthy))
+        Console.WriteLine($"  정상 파일  : {JournalReader.Verify(ok)}");
+
+    // 페이로드 1바이트를 뒤집는다 — 길이는 그대로라 체크섬이 없으면 감지되지 않는다
+    byte[] corrupted = (byte[])healthy.Clone();
+    int payloadOffset = 16 + 20 + 4;
+    corrupted[payloadOffset] ^= 0xFF;
+
+    using (var bad = new MemoryStream(corrupted))
+        Console.WriteLine($"  손상 파일  : {JournalReader.Verify(bad)}");
+
+    // 크래시로 잘린 파일은 마지막 유효 지점까지 복구되어야 한다
+    using (var truncated = new MemoryStream(healthy[..^10]))
+    {
+        int recovered = JournalReader.Read(truncated,
+            new JournalReadOptions { Mode = JournalReadMode.TruncateAtCorruption }).Count();
+        Console.WriteLine($"  잘린 파일  : {recovered:N0}건 복구 (마지막 유효 레코드까지)");
+    }
+
+    Console.WriteLine("  → 손상이 조용히 잘못된 상태로 재생되는 일이 없다");
+}
+
+// =====================================================
+// 예제 9: 샤딩 — 수천 룸을 코어 수만큼의 스레드로
 // =====================================================
 void ShardedRoomExample()
 {
-    Console.WriteLine("--- 예제 6: ShardedDisruptor (룸 샤딩) ---");
+    Console.WriteLine("--- 예제 9: ShardedDisruptor (룸 샤딩) ---");
 
     const int rooms = 5_000;
     const int eventsPerRoom = 40;
@@ -324,6 +486,7 @@ void ShardedRoomExample()
         }
     });
 
+    ShardHealth[] health = sharded.HealthSnapshot();
     sharded.Shutdown(TimeSpan.FromSeconds(20));
     sw.Stop();
 
@@ -333,6 +496,7 @@ void ShardedRoomExample()
     Console.WriteLine($"  룸 {rooms:N0}개 × {eventsPerRoom}건 = {(long)rooms * eventsPerRoom:N0}건");
     Console.WriteLine($"  처리 {total:N0}건, 관측된 룸 {distinctRooms:N0}개, {sw.Elapsed.TotalMilliseconds:F0}ms");
     Console.WriteLine($"  샤드별 처리량: [{string.Join(", ", handlers.Select(h => h.Count.ToString("N0")))}]");
+    Console.WriteLine($"  샤드 사용률  : [{string.Join(", ", health.Select(h => h.Utilization.ToString("P0")))}]");
     Console.WriteLine($"  스레드 {shardCount}개로 룸 {rooms:N0}개 처리 " +
                       $"(룸당 Disruptor 였다면 스레드 {rooms:N0}개 + 링 메모리 수백 MB)");
     Console.WriteLine(handlers.All(h => h.OrderViolations == 0)
@@ -341,18 +505,18 @@ void ShardedRoomExample()
 }
 
 // =====================================================
-// 예제 7: WorkerPool — 순서 무관 + 느린 작업 분배
+// 예제 10: WorkerPool — 순서 무관 + 느린 작업 분배
 // =====================================================
 void WorkerPoolExample()
 {
-    Console.WriteLine("--- 예제 7: WorkerPool (DB 쓰기 분배) ---");
+    Console.WriteLine("--- 예제 10: WorkerPool (DB 쓰기 분배) ---");
 
     const int count = 20_000;
     var workers = new DbWriteWorker[4];
 
     using var disruptor = new Disruptor<OrderEvent>(
         () => new OrderEvent(), 1024, ProducerType.Single, new YieldingWaitStrategy(),
-        new DisruptorOptions { Name = "worker-pool" });
+        new DisruptorOptions { Name = "worker-pool", AutoClearSlots = false });
 
     var logic = new BusinessLogicHandler();
 
@@ -377,11 +541,11 @@ void WorkerPoolExample()
 }
 
 // =====================================================
-// 예제 8: 관측성 — 스톨 감지
+// 예제 11: 관측성 — 스톨 감지
 // =====================================================
 void ObservabilityExample()
 {
-    Console.WriteLine("--- 예제 8: 스톨 감지 ---");
+    Console.WriteLine("--- 예제 11: 스톨 감지 ---");
 
     var stalls = new List<StallInfo>();
 
@@ -391,6 +555,7 @@ void ObservabilityExample()
         {
             Name = "packet-pipeline",
             StallThreshold = TimeSpan.FromMilliseconds(50),
+            StallReportInterval = TimeSpan.FromMilliseconds(200),
             OnStall = info => { lock (stalls) stalls.Add(info); },
             EnableMetrics = true,
         });
@@ -408,18 +573,18 @@ void ObservabilityExample()
 
     disruptor.Shutdown(TimeSpan.FromSeconds(20));
 
-    Console.WriteLine($"  스톨 감지 {stalls.Count}회");
+    Console.WriteLine($"  스톨 감지 {stalls.Count}회 (rate-limit 200ms 로 로그 폭주 방지)");
     if (stalls.Count > 0)
         Console.WriteLine($"  {stalls[0]}");
     Console.WriteLine("  → 어느 핸들러가 병목인지 즉시 지목된다 (이게 없으면 사고를 못 푼다)");
 }
 
 // =====================================================
-// 예제 9: 성능 벤치마크
+// 예제 12: 성능 벤치마크
 // =====================================================
 void PerformanceBenchmark()
 {
-    Console.WriteLine("--- 예제 9: 처리량 (단일 프로듀서) ---");
+    Console.WriteLine("--- 예제 12: 처리량 (단일 프로듀서) ---");
 
     const int iterations = 10_000_000;
     using var completion = new ManualResetEventSlim(false);
@@ -469,11 +634,11 @@ void PerformanceBenchmark()
 }
 
 // =====================================================
-// 예제 10: 다중 프로듀서 무결성 검증 (백프레셔 회귀 테스트)
+// 예제 13: 다중 프로듀서 무결성 검증 (백프레셔 회귀 테스트)
 // =====================================================
 void MultiProducerIntegrityCheck()
 {
-    Console.WriteLine("--- 예제 10: 다중 프로듀서 무결성 (링을 작게 잡아 백프레셔 유발) ---");
+    Console.WriteLine("--- 예제 13: 다중 프로듀서 무결성 (링을 작게 잡아 백프레셔 유발) ---");
 
     const int producerCount = 8;
     const int eventsPerProducer = 100_000;
@@ -567,6 +732,18 @@ public sealed class OrderEvent : IClearable
         => $"Order[{OrderId}] {Symbol} {Quantity}@{Price:F2}";
 }
 
+/// <summary>델리게이트조차 만들지 않는 구조체 translator.</summary>
+public readonly struct FillMsftOrder : IEventTranslator<OrderEvent, long>
+{
+    public void Translate(OrderEvent evt, long sequence, long id)
+    {
+        evt.OrderId = id;
+        evt.Symbol = "MSFT";
+        evt.Price = 300.0;
+        evt.Quantity = 200;
+    }
+}
+
 public sealed class PrintHandler : IEventHandler<OrderEvent>
 {
     public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
@@ -603,6 +780,26 @@ public sealed class BusinessLogicHandler : IEventHandler<OrderEvent>
 
     public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
         => Interlocked.Increment(ref _count);
+}
+
+/// <summary>이벤트 구간을 span 으로 통째로 받아 합계를 낸다.</summary>
+public sealed class SpanSumHandler : IBatchEventHandler<OrderEvent>
+{
+    public long Sum { get; private set; }
+    public long Events { get; private set; }
+    public long BatchCalls { get; private set; }
+    public int MaxSegment { get; private set; }
+
+    public void OnBatch(ReadOnlySpan<OrderEvent> events, long startSequence, bool endOfBatch)
+    {
+        BatchCalls++;
+        if (events.Length > MaxSegment) MaxSegment = events.Length;
+
+        for (int i = 0; i < events.Length; i++)
+            Sum += events[i].OrderId;
+
+        Events += events.Length;
+    }
 }
 
 public sealed class SlowBusinessHandler : IEventHandler<OrderEvent>

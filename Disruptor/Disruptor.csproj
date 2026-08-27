@@ -6,6 +6,13 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
 
+    <!--
+      어셈블리 이름을 패키지 ID 와 맞춘다. 공식 disruptor-net 패키지도 어셈블리 이름이 'Disruptor' 라서,
+      벤치마크에서 둘을 나란히 참조하려면 이름이 달라야 한다. 네임스페이스는 Disruptor 그대로 유지한다.
+    -->
+    <AssemblyName>DisruptorCS</AssemblyName>
+    <RootNamespace>Disruptor</RootNamespace>
+
     <!-- 성능 라이브러리 필수 설정 -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsAotCompatible>true</IsAotCompatible>
@@ -19,25 +26,61 @@
 
     <!-- 패키징 -->
     <PackageId>DisruptorCS</PackageId>
-    <Version>0.2.0</Version>
     <Authors>DisruptorCS Contributors</Authors>
-    <Description>LMAX Disruptor의 C# 구현. 게임 서버용 확장(샤딩, 틱 통합, 결정론적 저널/리플레이) 포함.</Description>
-    <PackageTags>disruptor;ringbuffer;lock-free;low-latency;game-server</PackageTags>
+    <Description>LMAX Disruptor for C#, with a game-server layer: sharding, fixed-tick integration, and deterministic journal/replay.</Description>
+    <PackageTags>disruptor;ringbuffer;lock-free;low-latency;game-server;high-performance</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/jacking75/DisruptorCS</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/jacking75/DisruptorCS</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+
+    <!-- MinVer: git tag 기반 SemVer. 태그가 없으면 0.0.0-alpha.0.N 이 된다. -->
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+    <MinVerDefaultPreReleaseIdentifiers>preview.0</MinVerDefaultPreReleaseIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="..\README.md" Pack="true" PackagePath="\" Visible="false" />
+    <!-- XxHash3: 저널 레코드 무결성 검증용. CRC32C 대비 수 배 빠르고 하드웨어 의존이 없다. -->
+    <PackageReference Include="System.IO.Hashing" Version="9.0.0" />
+
+    <!-- 수동 릴리스일수록 버전 실수 방지 장치가 필요하다. -->
+    <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="/" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="Disruptor.Tests" />
     <InternalsVisibleTo Include="Disruptor.Benchmarks" />
+    <InternalsVisibleTo Include="Disruptor.Soak" />
   </ItemGroup>
+
+  <!--
+    Analyzer 동봉: 설치하면 IDE 가 오용(async 핸들러, finally 없는 Publish, 캡처 람다,
+    2의 거듭제곱 아닌 링 크기)을 컴파일 타임에 잡아준다.
+    ReferenceOutputAssembly=false 로 참조는 걸지 않고 빌드 순서만 강제한다.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="../Disruptor.Analyzers/Disruptor.Analyzers.csproj"
+                      ReferenceOutputAssembly="false"
+                      OutputItemType="Analyzer"
+                      PrivateAssets="all" />
+  </ItemGroup>
+
+  <Target Name="PackAnalyzer" BeforeTargets="_GetPackageFiles">
+    <PropertyGroup>
+      <_AnalyzerDll>$(MSBuildThisFileDirectory)../Disruptor.Analyzers/bin/$(Configuration)/netstandard2.0/Disruptor.Analyzers.dll</_AnalyzerDll>
+    </PropertyGroup>
+    <ItemGroup Condition="Exists('$(_AnalyzerDll)')">
+      <None Include="$(_AnalyzerDll)" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    </ItemGroup>
+  </Target>
 
 </Project>

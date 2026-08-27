@@ -27,6 +27,7 @@ public sealed class ShardedDisruptor<T> : IDisposable where T : class
     private readonly Dsl.Disruptor<T>[] _shards;
     private readonly RingBuffer<T>[] _rings;
     private readonly PublishGate<T>[] _gates;
+    private readonly bool[] _shardHalted;
     private readonly int _shardMask;
     private int _started;
 
@@ -57,6 +58,7 @@ public sealed class ShardedDisruptor<T> : IDisposable where T : class
         _shards = new Dsl.Disruptor<T>[shardCount];
         _rings = new RingBuffer<T>[shardCount];
         _gates = new PublishGate<T>[shardCount];
+        _shardHalted = new bool[shardCount];
 
         for (int i = 0; i < shardCount; i++)
         {
@@ -69,7 +71,15 @@ public sealed class ShardedDisruptor<T> : IDisposable where T : class
                 eventFactory, ringSizePerShard, producerType, waitStrategy, shardOptions);
 
             disruptor.HandleEventsWith(handlerFactory(i));
-            disruptor.ProcessorHalted += (p, ex) => ProcessorHalted?.Invoke(p, ex);
+
+            // 샤드가 정지하면 그 샤드의 게이팅이 멈추므로, Block 정책으로 게시하던 스레드가
+            // 영구 대기하게 된다. 마킹해서 이후 게시는 fail-fast 시킨다.
+            int shardIndex = i;
+            disruptor.ProcessorHalted += (p, ex) =>
+            {
+                Volatile.Write(ref _shardHalted[shardIndex], true);
+                ProcessorHalted?.Invoke(p, ex);
+            };
 
             _shards[i] = disruptor;
         }
@@ -120,12 +130,26 @@ public sealed class ShardedDisruptor<T> : IDisposable where T : class
     /// <summary>키에 해당하는 샤드의 링 버퍼.</summary>
     public RingBuffer<T> RingBufferForKey(long key) => _rings[ShardOf(key)];
 
-    /// <summary>키에 해당하는 샤드에 이벤트를 게시합니다. 용량이 없으면 대기합니다.</summary>
-    public void Publish(long key, Action<T, long> fill)
+    /// <summary>
+    /// 키에 해당하는 샤드에 이벤트를 게시합니다. 용량이 없으면 대기합니다.
+    /// </summary>
+    /// <remarks>
+    /// <b>주의</b>: 샤드 핸들러가 <see cref="EventExceptionAction.Halt"/>로 정지하면 이 호출은
+    /// 영구 대기할 수 있습니다. 실서비스에서는
+    /// <see cref="TryPublish"/>(<see cref="BackpressurePolicy.FailAfterTimeout"/>)를 사용하거나
+    /// <paramref name="cancellationToken"/>을 넘겨 서버 종료 시 탈출할 수 있게 하세요.
+    /// </remarks>
+    /// <exception cref="ShardHaltedException">해당 샤드가 정지한 경우.</exception>
+    public void Publish(long key, Action<T, long> fill, CancellationToken cancellationToken = default)
     {
         EnsureStarted();
-        var ring = _rings[ShardOf(key)];
-        long seq = ring.Next();
+
+        int shard = ShardOf(key);
+        if (Volatile.Read(ref _shardHalted[shard]))
+            throw new ShardHaltedException(shard);
+
+        var ring = _rings[shard];
+        long seq = ring.Next(cancellationToken);
         try
         {
             fill(ring[seq], seq);
@@ -136,7 +160,9 @@ public sealed class ShardedDisruptor<T> : IDisposable where T : class
         }
     }
 
-    /// <summary>정책에 따라 게시합니다.</summary>
+    /// <summary>
+    /// 정책에 따라 게시합니다. 정지한 샤드로의 게시는 블록되지 않고 즉시 false 를 반환합니다.
+    /// </summary>
     public bool TryPublish(long key, Action<T, long> fill,
                            BackpressurePolicy policy = BackpressurePolicy.FailAfterTimeout,
                            TimeSpan? timeout = null,
@@ -144,7 +170,36 @@ public sealed class ShardedDisruptor<T> : IDisposable where T : class
                            CancellationToken cancellationToken = default)
     {
         EnsureStarted();
-        return _gates[ShardOf(key)].TryPublish(policy, fill, opCode, timeout, cancellationToken);
+
+        int shard = ShardOf(key);
+        if (Volatile.Read(ref _shardHalted[shard]))
+            return false; // 죽은 샤드에 블록되지 않는다
+
+        return _gates[shard].TryPublish(policy, fill, opCode, timeout, cancellationToken);
+    }
+
+    /// <summary>샤드가 정지했는가.</summary>
+    public bool IsShardHalted(int shard) => Volatile.Read(ref _shardHalted[shard]);
+
+    /// <summary>
+    /// 샤드별 건강 상태 스냅샷. 헬스체크·대시보드에서 소비하세요.
+    /// </summary>
+    public ShardHealth[] HealthSnapshot()
+    {
+        EnsureStarted();
+
+        var result = new ShardHealth[_shards.Length];
+        for (int i = 0; i < _shards.Length; i++)
+        {
+            result[i] = new ShardHealth(
+                Shard: i,
+                Utilization: _rings[i].Utilization,
+                RemainingCapacity: _rings[i].RemainingCapacity,
+                Halted: Volatile.Read(ref _shardHalted[i]),
+                Dropped: _gates[i].DroppedCount,
+                Rejected: _gates[i].RejectedCount);
+        }
+        return result;
     }
 
     /// <summary>샤드별 사용률. 특정 샤드에 부하가 몰렸는지 확인할 때 사용합니다.</summary>
@@ -178,4 +233,30 @@ public sealed class ShardedDisruptor<T> : IDisposable where T : class
         foreach (var shard in _shards)
             shard.Dispose();
     }
+}
+
+/// <summary>샤드 하나의 건강 상태 스냅샷.</summary>
+/// <param name="Shard">샤드 인덱스</param>
+/// <param name="Utilization">링 버퍼 사용률 (0~1)</param>
+/// <param name="RemainingCapacity">남은 슬롯 수</param>
+/// <param name="Halted">핸들러가 정지했는가 — true 면 이 샤드로의 게시가 곧 막힌다</param>
+/// <param name="Dropped">혼잡으로 드롭된 누적 건수</param>
+/// <param name="Rejected">타임아웃으로 거절된 누적 건수</param>
+public readonly record struct ShardHealth(
+    int Shard,
+    double Utilization,
+    long RemainingCapacity,
+    bool Halted,
+    long Dropped,
+    long Rejected);
+
+/// <summary>정지한 샤드에 게시를 시도했을 때 발생합니다.</summary>
+public sealed class ShardHaltedException : InvalidOperationException
+{
+    public ShardHaltedException(int shard)
+        : base($"샤드 {shard} 의 핸들러가 정지했습니다. 이 샤드로 게시하면 영구 대기하게 되므로 거부합니다. " +
+               "ProcessorHalted 이벤트를 구독해 서버를 계획적으로 드레인하세요.")
+        => Shard = shard;
+
+    public int Shard { get; }
 }

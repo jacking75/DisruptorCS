@@ -30,6 +30,7 @@ public sealed class ValueDisruptor<T> : DisruptorBase where T : struct
                 PipelineName = Options.Name,
                 Backoff = Options.ProducerBackoff,
                 StallThreshold = Options.StallThreshold,
+                StallReportInterval = Options.StallReportInterval,
                 OnStall = info =>
                 {
                     Metrics?.RecordStall(info);
@@ -55,6 +56,10 @@ public sealed class ValueDisruptor<T> : DisruptorBase where T : struct
     public ValueEventHandlerGroup HandleEventsWith(params IValueEventHandler<T>[] handlers)
         => CreateEventProcessors([], handlers);
 
+    /// <summary>배치 핸들러를 등록합니다. 이벤트 구간을 쓰기 가능한 span 으로 받습니다.</summary>
+    public ValueEventHandlerGroup HandleEventsWith(params IValueBatchEventHandler<T>[] handlers)
+        => CreateBatchProcessors([], handlers);
+
     public sealed class ValueEventHandlerGroup
     {
         private readonly ValueDisruptor<T> _disruptor;
@@ -69,6 +74,60 @@ public sealed class ValueDisruptor<T> : DisruptorBase where T : struct
 
         public ValueEventHandlerGroup Then(params IValueEventHandler<T>[] handlers)
             => _disruptor.CreateEventProcessors(Sequences, handlers);
+
+        /// <summary>이 그룹이 완료된 후에 실행될 배치 핸들러를 등록합니다.</summary>
+        public ValueEventHandlerGroup Then(params IValueBatchEventHandler<T>[] handlers)
+            => _disruptor.CreateBatchProcessors(Sequences, handlers);
+
+        /// <inheritdoc cref="Disruptor{T}.EventHandlerGroup.And"/>
+        public ValueEventHandlerGroup And(ValueEventHandlerGroup other)
+        {
+            ArgumentNullException.ThrowIfNull(other);
+
+            var merged = new Sequence[Sequences.Length + other.Sequences.Length];
+            Sequences.CopyTo(merged, 0);
+            other.Sequences.CopyTo(merged, Sequences.Length);
+
+            return new ValueEventHandlerGroup(_disruptor, merged);
+        }
+    }
+
+    private ValueEventHandlerGroup CreateBatchProcessors(
+        Sequence[] barrierSequences,
+        IValueBatchEventHandler<T>[] handlers)
+    {
+        ArgumentNullException.ThrowIfNull(handlers);
+        if (handlers.Length == 0)
+            throw new ArgumentException("최소 1개의 핸들러가 필요합니다.", nameof(handlers));
+
+        EnsureNotStarted();
+
+        var processorSequences = new Sequence[handlers.Length];
+
+        for (int i = 0; i < handlers.Length; i++)
+        {
+            var barrier = _ringBuffer.NewBarrier(barrierSequences);
+            var processor = new ValueBatchEventProcessor<T>(_ringBuffer, barrier, handlers[i])
+            {
+                MaxBatchSize = Options.MaxBatchSize,
+            };
+            processor.Recorder = Metrics?.CreateRecorder(processor.Name);
+
+            if (_defaultExceptionHandler is not null)
+                processor.SetExceptionHandler(_defaultExceptionHandler);
+
+            processor.Halted += RaiseProcessorHalted;
+
+            _batchProcessors.Add(processor);
+            RegisteredProcessors.Add(processor);
+            processorSequences[i] = processor.Sequence;
+
+            RegisterProcessorDiagnostics(processor);
+        }
+
+        UpdateGatingSequences(barrierSequences, processorSequences);
+
+        return new ValueEventHandlerGroup(this, processorSequences);
     }
 
     private ValueEventHandlerGroup CreateEventProcessors(
@@ -88,8 +147,9 @@ public sealed class ValueDisruptor<T> : DisruptorBase where T : struct
             var barrier = _ringBuffer.NewBarrier(barrierSequences);
             var processor = new ValueBatchEventProcessor<T>(_ringBuffer, barrier, handlers[i])
             {
-                Metrics = Metrics,
+                MaxBatchSize = Options.MaxBatchSize,
             };
+            processor.Recorder = Metrics?.CreateRecorder(processor.Name);
 
             if (_defaultExceptionHandler is not null)
                 processor.SetExceptionHandler(_defaultExceptionHandler);

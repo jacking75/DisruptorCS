@@ -17,6 +17,12 @@
 
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" Version="0.14.0" />
+
+    <!--
+      공식 disruptor-net. 네임스페이스가 우리와 같은 'Disruptor' 라서 extern alias 로 분리한다.
+      정직한 비교가 신뢰를 만든다 — 지는 항목도 그대로 게시한다.
+    -->
+    <PackageReference Include="Disruptor" Version="6.0.1" Aliases="DisruptorNet" />
   </ItemGroup>
 
   <ItemGroup>

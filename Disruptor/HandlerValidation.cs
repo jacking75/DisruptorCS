@@ -45,4 +45,51 @@ internal static class HandlerValidation
             }
         }
     }
+
+    /// <summary>
+    /// 핸들러가 인터페이스 기본 구현(DIM)을 그대로 쓰는지, 직접 구현했는지 판별합니다.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>OnBatchStart</c> 같은 선택적 훅은 대부분의 핸들러가 구현하지 않습니다. 그런데도 매 배치마다
+    /// 호출하면 <b>DIM 디스패치</b> 비용을 지불하게 됩니다 — 일반 인터페이스 호출보다 비싸고,
+    /// 링이 작아 배치가 작을수록 이 고정 비용이 처리량을 지배합니다.
+    /// </para>
+    /// <para>
+    /// 생성 시점에 한 번만 판별해 두고, 구현하지 않은 훅은 아예 호출하지 않습니다.
+    /// 판별에 실패하면 보수적으로 "구현했다"고 보아 동작은 항상 안전합니다.
+    /// </para>
+    /// </remarks>
+    [UnconditionalSuppressMessage("Trimming", "IL2070",
+        Justification = "생성 시점 1회 검사이며, 실패 시 훅을 호출하는 보수적 기본값으로 동작합니다.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2075",
+        Justification = "생성 시점 1회 검사이며, 실패 시 훅을 호출하는 보수적 기본값으로 동작합니다.")]
+    public static bool ImplementsHook(
+        object handler,
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces |
+                                    DynamicallyAccessedMemberTypes.PublicMethods |
+                                    DynamicallyAccessedMemberTypes.NonPublicMethods)]
+        Type interfaceType,
+        string methodName)
+    {
+        try
+        {
+            InterfaceMapping map = handler.GetType().GetInterfaceMap(interfaceType);
+
+            for (int i = 0; i < map.InterfaceMethods.Length; i++)
+            {
+                if (map.InterfaceMethods[i].Name != methodName)
+                    continue;
+
+                // DIM 을 그대로 쓰면 대상 메서드의 선언 타입이 인터페이스 자신이다.
+                return map.TargetMethods[i].DeclaringType != interfaceType;
+            }
+        }
+        catch (ArgumentException)
+        {
+            // 매핑을 구할 수 없는 경우(제네릭 특수 상황 등)에는 보수적으로 호출한다.
+        }
+
+        return true;
+    }
 }
