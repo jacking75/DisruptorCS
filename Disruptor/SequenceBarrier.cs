@@ -1,5 +1,4 @@
 using Disruptor.WaitStrategy;
-using System.Runtime.CompilerServices;
 
 namespace Disruptor;
 
@@ -8,99 +7,46 @@ public sealed class SequenceBarrier : ISequenceBarrier
     private readonly ISequencer _sequencer;
     private readonly IWaitStrategy _waitStrategy;
     private readonly Sequence _cursorSequence;
-    private readonly Sequence _waitSequence;          // WaitStrategy에 전달할 시퀀스
-    private readonly Sequence[]? _compositeSequences;  // 2개 이상 의존 시 사용
-    private volatile bool _alerted;
+    private readonly DependentSequenceGroup _dependents;
 
     public SequenceBarrier(ISequencer sequencer, IWaitStrategy waitStrategy,
                            Sequence cursorSequence, params Sequence[] dependentSequences)
     {
+        ArgumentNullException.ThrowIfNull(sequencer);
+        ArgumentNullException.ThrowIfNull(waitStrategy);
+        ArgumentNullException.ThrowIfNull(cursorSequence);
+
         _sequencer = sequencer;
         _waitStrategy = waitStrategy;
         _cursorSequence = cursorSequence;
-
-        if (dependentSequences.Length == 0)
-        {
-            // 의존 없음 — 커서만 추적
-            _waitSequence = cursorSequence;
-            _compositeSequences = null;
-        }
-        else if (dependentSequences.Length == 1)
-        {
-            // 단일 의존 — 해당 시퀀스를 직접 전달 (virtual dispatch 없음)
-            _waitSequence = dependentSequences[0];
-            _compositeSequences = null;
-        }
-        else
-        {
-            // 다중 의존 — 커서로 대기 후 별도로 최솟값 체크
-            _waitSequence = cursorSequence;
-            _compositeSequences = dependentSequences;
-        }
-    }
-
-    public long WaitFor(long sequence)
-    {
-        CheckAlert();
-        long availableSequence = _waitStrategy.WaitFor(
-            sequence, _cursorSequence, _waitSequence, this);
-
-        if (availableSequence < sequence)
-            return availableSequence;
-
-        // Multi-producer 안전: 연속적으로 게시된 최고 시퀀스만 반환
-        // (Single-producer에서는 availableSequence를 그대로 반환하므로 오버헤드 없음)
-        long highestPublished = _sequencer.GetHighestPublishedSequence(
-            sequence, availableSequence);
-
-        if (_compositeSequences != null)
-        {
-            // 모든 의존 시퀀스가 요청 시퀀스 이상이 될 때까지 대기
-            // SpinWait를 사용하여 spin → yield → sleep 자동 에스컬레이션
-            long min;
-            var spinWait = new SpinWait();
-            while ((min = GetMinimumSequence(_compositeSequences)) < sequence)
-            {
-                CheckAlert();
-                spinWait.SpinOnce();
-            }
-            if (min < highestPublished)
-                highestPublished = min;
-        }
-
-        return highestPublished;
+        _dependents = new DependentSequenceGroup(cursorSequence, dependentSequences ?? []);
     }
 
     public long Cursor => _cursorSequence.Value;
 
-    public bool IsAlerted => _alerted;
+    public DependentSequenceGroup Dependents => _dependents;
 
-    public void Alert()
-    {
-        _alerted = true;
-        _waitStrategy.SignalAllWhenBlocking();
-    }
+    public IWaitStrategy WaitStrategy => _waitStrategy;
 
-    public void ClearAlert()
+    public SequenceWaitResult WaitFor(long sequence, CancellationToken cancellationToken)
     {
-        _alerted = false;
-    }
+        var result = _waitStrategy.WaitFor(sequence, _dependents, cancellationToken);
 
-    public void CheckAlert()
-    {
-        if (_alerted)
-            throw AlertException.Instance;
-    }
+        if (result.IsCancelled || result.IsTimeout)
+            return result;
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static long GetMinimumSequence(Sequence[] sequences)
-    {
-        long min = long.MaxValue;
-        for (int i = 0; i < sequences.Length; i++)
-        {
-            long val = sequences[i].Value;
-            if (val < min) min = val;
-        }
-        return min;
+        long available = result.AvailableSequence;
+        if (available < sequence)
+            return available;
+
+        // 의존 핸들러가 있다면 available 은 이미 "상위 핸들러가 처리를 끝낸" 시퀀스이고,
+        // 처리되었다는 것은 게시되었다는 뜻이므로 게시 여부를 다시 확인할 필요가 없다.
+        // (Multi 프로듀서에서 O(n) 스캔을 건너뛰는 최적화)
+        if (!_dependents.DependsOnCursor)
+            return available;
+
+        // Multi-producer 안전: 연속적으로 게시된 최고 시퀀스만 반환
+        // (Single-producer에서는 availableSequence를 그대로 반환하므로 오버헤드 없음)
+        return _sequencer.GetHighestPublishedSequence(sequence, available);
     }
 }

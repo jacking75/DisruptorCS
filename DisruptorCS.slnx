@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Disruptor.Benchmarks/Disruptor.Benchmarks.csproj" />
+  <Project Path="Disruptor.Tests/Disruptor.Tests.csproj" />
+  <Project Path="Disruptor/Disruptor.csproj" />
+  <Project Path="Example/Example.csproj" />
+</Solution>

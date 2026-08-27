@@ -1,30 +1,64 @@
+using System.Buffers;
+using System.Buffers.Binary;
+using System.Diagnostics;
 using Disruptor;
 using Disruptor.Dsl;
+using Disruptor.Game;
 using Disruptor.WaitStrategy;
-using System.Diagnostics;
+using Disruptor.Work;
 
+Console.OutputEncoding = System.Text.Encoding.UTF8;
+Console.WriteLine("=== DisruptorCS — 게임 서버 예제 ===\n");
 
-Console.WriteLine("=== LMAX Disruptor C# Implementation ===\n");
+BasicExample();
+Console.WriteLine();
 
-/// <summary>기본 사용 예제</summary>
+DependencyGraphExample();
+Console.WriteLine();
+
+BackpressurePolicyExample();
+Console.WriteLine();
+
+TickLoopExample();
+Console.WriteLine();
+
+JournalReplayExample();
+Console.WriteLine();
+
+ShardedRoomExample();
+Console.WriteLine();
+
+WorkerPoolExample();
+Console.WriteLine();
+
+ObservabilityExample();
+Console.WriteLine();
+
+PerformanceBenchmark();
+Console.WriteLine();
+
+MultiProducerIntegrityCheck();
+
+// =====================================================
+// 예제 1: 기본 사용법
+// =====================================================
 void BasicExample()
 {
-    Console.WriteLine("--- Example 1: Basic Usage ---");
+    Console.WriteLine("--- 예제 1: 기본 사용법 ---");
 
     using var disruptor = new Disruptor<OrderEvent>(
         eventFactory: () => new OrderEvent(),
         ringBufferSize: 1024,
         producerType: ProducerType.Single,
-        waitStrategy: new BlockingWaitStrategy());
+        waitStrategy: new BlockingWaitStrategy(),
+        options: new DisruptorOptions { Name = "basic" });
 
-    // 핸들러 등록
     disruptor.HandleEventsWith(new PrintHandler());
 
-    // 시작
     var ringBuffer = disruptor.Start();
 
-    // 이벤트 게시 — 방법 1: Next/Publish 패턴
-    for (int i = 0; i < 5; i++)
+    // 방법 1: Next/Publish 패턴
+    for (int i = 0; i < 3; i++)
     {
         long sequence = ringBuffer.Next();
         try
@@ -41,7 +75,7 @@ void BasicExample()
         }
     }
 
-    // 이벤트 게시 — 방법 2: Lambda 패턴
+    // 방법 2: Lambda 패턴
     ringBuffer.PublishEvent((evt, seq) =>
     {
         evt.OrderId = 999;
@@ -50,7 +84,7 @@ void BasicExample()
         evt.Quantity = 50;
     });
 
-    // 이벤트 게시 — 방법 3: using Scope 패턴
+    // 방법 3: using 스코프 패턴 — try/finally 를 잊어 링 버퍼를 막는 사고를 구조적으로 방지
     using (var scope = ringBuffer.PublishEventScope())
     {
         var evt = scope.Event();
@@ -60,37 +94,38 @@ void BasicExample()
         evt.Quantity = 200;
     }
 
-    Thread.Sleep(500); // 처리 대기
+    // Shutdown 이 미처리 이벤트를 드레인하므로 Thread.Sleep 이 필요 없다.
     disruptor.Shutdown();
-    Console.WriteLine("Basic example completed.\n");
+    Console.WriteLine("  완료.");
 }
 
-/// <summary>의존성 그래프 예제</summary>
+// =====================================================
+// 예제 2: 의존성 그래프 (저널 + 복제 → 비즈니스 로직)
+// =====================================================
 void DependencyGraphExample()
 {
-    Console.WriteLine("--- Example 2: Dependency Graph ---");
+    Console.WriteLine("--- 예제 2: 의존성 그래프 ---");
     Console.WriteLine("  JournalHandler ──┐");
-    Console.WriteLine("                    ├──> BusinessLogicHandler");
+    Console.WriteLine("                   ├──> BusinessLogicHandler");
     Console.WriteLine("  ReplicationHandler ┘\n");
 
     using var disruptor = new Disruptor<OrderEvent>(
         () => new OrderEvent(),
         ringBufferSize: 1024,
         producerType: ProducerType.Single,
-        waitStrategy: new YieldingWaitStrategy());
+        waitStrategy: new YieldingWaitStrategy(),
+        options: new DisruptorOptions { Name = "pipeline" });
 
-    var journalHandler = new JournalHandler();
+    var journalHandler = new JournalCountHandler();
     var replicationHandler = new ReplicationHandler();
     var businessHandler = new BusinessLogicHandler();
 
-    // 의존성 그래프 구성:
-    // Journal과 Replication이 먼저 처리 → 그 후에 BusinessLogic 처리
     disruptor.HandleEventsWith(journalHandler, replicationHandler)
              .Then(businessHandler);
 
     var ringBuffer = disruptor.Start();
 
-    const int eventCount = 10_000;
+    const int eventCount = 100_000;
     for (int i = 0; i < eventCount; i++)
     {
         long seq = ringBuffer.Next();
@@ -108,43 +143,308 @@ void DependencyGraphExample()
         }
     }
 
-    Thread.Sleep(1000);
-    Console.WriteLine($"  BusinessLogicHandler processed: {businessHandler.Count} events");
-    disruptor.Shutdown();
+    disruptor.Shutdown(TimeSpan.FromSeconds(10));
+
+    Console.WriteLine($"  Journal     : {journalHandler.Count:N0}건");
+    Console.WriteLine($"  Replication : {replicationHandler.Count:N0}건");
+    Console.WriteLine($"  BusinessLogic: {businessHandler.Count:N0}건 (최대 배치 {businessHandler.MaxBatch:N0})");
+    Console.WriteLine(businessHandler.Count == eventCount ? "  → 유실 없음" : "  → 유실 발생!");
 }
 
-/// <summary>성능 벤치마크</summary>
-void PerformanceBenchmark()
+// =====================================================
+// 예제 3: 백프레셔 정책 — 게임 서버는 "버리는 것"도 정책이다
+// =====================================================
+void BackpressurePolicyExample()
 {
-    Console.WriteLine("--- Example 3: Performance Benchmark ---");
-
-    const int iterations = 10_000_000;
-    var countdownEvent = new CountdownEvent(1);
+    Console.WriteLine("--- 예제 3: 백프레셔 정책 ---");
 
     using var disruptor = new Disruptor<OrderEvent>(
-        () => new OrderEvent(),
-        ringBufferSize: 1024 * 1024, // 1M
-        producerType: ProducerType.Single,
-        waitStrategy: new YieldingWaitStrategy());
+        () => new OrderEvent(), 256, ProducerType.Multi, new YieldingWaitStrategy(),
+        new DisruptorOptions { Name = "backpressure" });
 
-    var handler = new BenchmarkHandler(iterations, countdownEvent);
+    disruptor.HandleEventsWith(new SlowBusinessHandler(sleepMs: 1));
+    var ring = disruptor.Start();
+
+    var gate = new PublishGate<OrderEvent>(ring) { CongestionThreshold = 0.8 };
+
+    // 이동 패킷처럼 "최신값만 의미 있는" 이벤트 — 혼잡하면 버린다
+    for (int i = 0; i < 2_000; i++)
+        gate.TryPublish(BackpressurePolicy.DropWhenCongested, (e, s) => e.OrderId = i, opCode: 10);
+
+    // 결제처럼 "절대 버릴 수 없는" 이벤트 — 타임아웃 후 거절해 호출자가 오류 응답
+    int rejected = 0;
+    for (int i = 0; i < 200; i++)
+    {
+        if (!gate.TryPublish(BackpressurePolicy.FailAfterTimeout, (e, s) => e.OrderId = i,
+                             opCode: 20, timeout: TimeSpan.FromMilliseconds(5)))
+            rejected++;
+    }
+
+    Console.WriteLine($"  게시 {gate.PublishedCount:N0} / 드롭 {gate.DroppedCount:N0} / 거절 {gate.RejectedCount:N0}");
+    Console.WriteLine($"  → 이동 패킷은 버리고, 결제는 거절해 호출자가 오류 응답을 보낼 수 있다 ({rejected}건)");
+
+    disruptor.Shutdown(TimeSpan.FromSeconds(10));
+}
+
+// =====================================================
+// 예제 4: 틱 기반 게임 루프 — 이벤트 소비와 시뮬레이션을 한 스레드에서
+// =====================================================
+void TickLoopExample()
+{
+    Console.WriteLine("--- 예제 4: 60Hz 틱 루프 통합 ---");
+
+    var handler = new TickedRoomHandler();
+
+    using var disruptor = new Disruptor<OrderEvent>(
+        () => new OrderEvent(), 1024, ProducerType.Multi,
+        // 이벤트가 없어도 1ms마다 OnTimeout 이 호출되어 틱이 밀리지 않는다
+        new TimeoutBlockingWaitStrategy(TimeSpan.FromMilliseconds(1)),
+        new DisruptorOptions { Name = "tick-loop" });
+
+    disruptor.HandleEventsWith(handler);
+    var ring = disruptor.Start();
+
+    var sw = Stopwatch.StartNew();
+    int published = 0;
+
+    // 500ms 동안 불규칙하게 커맨드를 보낸다 (유휴 구간 포함)
+    while (sw.Elapsed < TimeSpan.FromMilliseconds(500))
+    {
+        for (int i = 0; i < 20; i++)
+        {
+            long seq = ring.Next();
+            ring[seq].OrderId = published++;
+            ring[seq].RoomId = published % 4;
+            ring.Publish(seq);
+        }
+        Thread.Sleep(20); // 유휴 구간 — 여기서도 틱은 계속 진행되어야 한다
+    }
+
+    disruptor.Shutdown(TimeSpan.FromSeconds(5));
+
+    Console.WriteLine($"  커맨드 {published:N0}건, 틱 {handler.TickCount:N0}회 " +
+                      $"({sw.Elapsed.TotalMilliseconds:F0}ms 동안, 60Hz면 약 {sw.Elapsed.TotalMilliseconds / 16.6:F0}회 기대)");
+    Console.WriteLine($"  건너뛴 틱: {handler.SkippedTicks} (death spiral 방지)");
+    Console.WriteLine("  → 유휴 구간에도 OnTimeout 으로 틱이 진행된다");
+}
+
+// =====================================================
+// 예제 5: 결정론적 저널 + 리플레이
+// =====================================================
+void JournalReplayExample()
+{
+    Console.WriteLine("--- 예제 5: 결정론적 저널 / 리플레이 ---");
+
+    const int eventCount = 20_000;
+    string path = Path.Combine(Path.GetTempPath(), $"disruptorcs-demo-{Environment.ProcessId}.journal");
+
+    var serializer = new OrderEventCodec();
+    var liveWorld = new WorldState();
+
+    try
+    {
+        using (var writer = JournalWriter.CreateFile(path))
+        using (var disruptor = new Disruptor<OrderEvent>(
+                   () => new OrderEvent(), 4096, ProducerType.Single, new YieldingWaitStrategy(),
+                   new DisruptorOptions { Name = "journal" }))
+        {
+            // 저널이 먼저 기록된 뒤에만 로직이 커밋된다
+            disruptor.HandleEventsWith(new JournalHandler<OrderEvent>(writer, serializer))
+                     .Then(new WorldUpdateHandler(liveWorld));
+
+            var ring = disruptor.Start();
+
+            for (int i = 0; i < eventCount; i++)
+            {
+                long seq = ring.Next();
+                var evt = ring[seq];
+                evt.OrderId = i;
+                evt.RoomId = i % 8;
+                evt.Quantity = (i * 37) % 101;
+                ring.Publish(seq);
+            }
+
+            disruptor.Shutdown(TimeSpan.FromSeconds(10));
+        }
+
+        // 리플레이: 같은 순서로 재생하면 상태가 정확히 재현되어야 한다
+        var replayedWorld = new WorldState();
+        using var fs = File.OpenRead(path);
+        long replayed = JournalReader.Replay(
+            fs, serializer, () => new OrderEvent(), new WorldUpdateHandler(replayedWorld));
+
+        Console.WriteLine($"  기록 {eventCount:N0}건 → 재생 {replayed:N0}건");
+        Console.WriteLine($"  원본 체크섬 : {liveWorld.Checksum}");
+        Console.WriteLine($"  재생 체크섬 : {replayedWorld.Checksum}");
+        Console.WriteLine(liveWorld.Checksum == replayedWorld.Checksum
+            ? "  → 상태 완전 일치 (버그 재현 / 핫 스탠바이 복제 / 치팅 검증에 사용 가능)"
+            : "  → 불일치! 결정론이 깨졌습니다");
+    }
+    finally
+    {
+        if (File.Exists(path)) File.Delete(path);
+    }
+}
+
+// =====================================================
+// 예제 6: 샤딩 — 수천 룸을 코어 수만큼의 스레드로
+// =====================================================
+void ShardedRoomExample()
+{
+    Console.WriteLine("--- 예제 6: ShardedDisruptor (룸 샤딩) ---");
+
+    const int rooms = 5_000;
+    const int eventsPerRoom = 40;
+    const int shardCount = 8;
+
+    var handlers = new RoomShardHandler[shardCount];
+
+    using var sharded = new ShardedDisruptor<OrderEvent>(
+        shardCount: shardCount,
+        ringSizePerShard: 4096,
+        eventFactory: () => new OrderEvent(),
+        handlerFactory: i => handlers[i] = new RoomShardHandler(),
+        producerType: ProducerType.Multi,
+        waitStrategyFactory: _ => new TimeoutBlockingWaitStrategy(TimeSpan.FromMilliseconds(1)),
+        options: new DisruptorOptions { Name = "rooms" });
+
+    sharded.Start();
+
+    var sw = Stopwatch.StartNew();
+    Parallel.For(0, rooms, room =>
+    {
+        for (int i = 0; i < eventsPerRoom; i++)
+        {
+            int order = i;
+            sharded.Publish(room, (evt, seq) =>
+            {
+                evt.RoomId = room;
+                evt.OrderId = order;
+            });
+        }
+    });
+
+    sharded.Shutdown(TimeSpan.FromSeconds(20));
+    sw.Stop();
+
+    long total = handlers.Sum(h => h.Count);
+    long distinctRooms = handlers.Sum(h => h.RoomCount);
+
+    Console.WriteLine($"  룸 {rooms:N0}개 × {eventsPerRoom}건 = {(long)rooms * eventsPerRoom:N0}건");
+    Console.WriteLine($"  처리 {total:N0}건, 관측된 룸 {distinctRooms:N0}개, {sw.Elapsed.TotalMilliseconds:F0}ms");
+    Console.WriteLine($"  샤드별 처리량: [{string.Join(", ", handlers.Select(h => h.Count.ToString("N0")))}]");
+    Console.WriteLine($"  스레드 {shardCount}개로 룸 {rooms:N0}개 처리 " +
+                      $"(룸당 Disruptor 였다면 스레드 {rooms:N0}개 + 링 메모리 수백 MB)");
+    Console.WriteLine(handlers.All(h => h.OrderViolations == 0)
+        ? "  → 룸별 순서 보장 확인"
+        : "  → 순서 위반 발생!");
+}
+
+// =====================================================
+// 예제 7: WorkerPool — 순서 무관 + 느린 작업 분배
+// =====================================================
+void WorkerPoolExample()
+{
+    Console.WriteLine("--- 예제 7: WorkerPool (DB 쓰기 분배) ---");
+
+    const int count = 20_000;
+    var workers = new DbWriteWorker[4];
+
+    using var disruptor = new Disruptor<OrderEvent>(
+        () => new OrderEvent(), 1024, ProducerType.Single, new YieldingWaitStrategy(),
+        new DisruptorOptions { Name = "worker-pool" });
+
+    var logic = new BusinessLogicHandler();
+
+    disruptor.HandleEventsWith(logic)
+             .ThenWorkerPool(4, i => workers[i] = new DbWriteWorker(i));
+
+    var ring = disruptor.Start();
+
+    for (int i = 0; i < count; i++)
+    {
+        long seq = ring.Next();
+        ring[seq].OrderId = i;
+        ring.Publish(seq);
+    }
+
+    disruptor.Shutdown(TimeSpan.FromSeconds(20));
+
+    Console.WriteLine($"  로직 처리 {logic.Count:N0}건");
+    Console.WriteLine($"  워커별 분배: [{string.Join(", ", workers.Select(w => w.Handled.ToString("N0")))}] " +
+                      $"= {workers.Sum(w => w.Handled):N0}건");
+    Console.WriteLine("  → 순서가 필요 없는 느린 I/O 는 워커 풀로 분리한다");
+}
+
+// =====================================================
+// 예제 8: 관측성 — 스톨 감지
+// =====================================================
+void ObservabilityExample()
+{
+    Console.WriteLine("--- 예제 8: 스톨 감지 ---");
+
+    var stalls = new List<StallInfo>();
+
+    using var disruptor = new Disruptor<OrderEvent>(
+        () => new OrderEvent(), 64, ProducerType.Single, new YieldingWaitStrategy(),
+        new DisruptorOptions
+        {
+            Name = "packet-pipeline",
+            StallThreshold = TimeSpan.FromMilliseconds(50),
+            OnStall = info => { lock (stalls) stalls.Add(info); },
+            EnableMetrics = true,
+        });
+
+    // 일부러 아주 느린 핸들러를 둔다
+    disruptor.HandleEventsWith(new SlowBusinessHandler(sleepMs: 5));
+    var ring = disruptor.Start();
+
+    for (int i = 0; i < 200; i++)
+    {
+        long seq = ring.Next();
+        ring[seq].OrderId = i;
+        ring.Publish(seq);
+    }
+
+    disruptor.Shutdown(TimeSpan.FromSeconds(20));
+
+    Console.WriteLine($"  스톨 감지 {stalls.Count}회");
+    if (stalls.Count > 0)
+        Console.WriteLine($"  {stalls[0]}");
+    Console.WriteLine("  → 어느 핸들러가 병목인지 즉시 지목된다 (이게 없으면 사고를 못 푼다)");
+}
+
+// =====================================================
+// 예제 9: 성능 벤치마크
+// =====================================================
+void PerformanceBenchmark()
+{
+    Console.WriteLine("--- 예제 9: 처리량 (단일 프로듀서) ---");
+
+    const int iterations = 10_000_000;
+    using var completion = new ManualResetEventSlim(false);
+
+    using var disruptor = new Disruptor<OrderEvent>(
+        () => new OrderEvent(), 1024 * 64, ProducerType.Single, new YieldingWaitStrategy(),
+        new DisruptorOptions { Name = "benchmark", AutoClearSlots = false });
+
+    var handler = new BenchmarkHandler(iterations, completion);
     disruptor.HandleEventsWith(handler);
 
     var ringBuffer = disruptor.Start();
 
     // 워밍업
-    for (int i = 0; i < 1000; i++)
+    for (int i = 0; i < 10_000; i++)
     {
-        long seq = ringBuffer.Next();
-        ringBuffer[seq].OrderId = i;
-        ringBuffer.Publish(seq);
+        long warm = ringBuffer.Next();
+        ringBuffer[warm].OrderId = i;
+        ringBuffer.Publish(warm);
     }
     Thread.Sleep(100);
-
-    // 벤치마크 시작
-    countdownEvent.Reset();
     handler.Reset(iterations);
+    completion.Reset();
 
+    long before = GC.GetTotalAllocatedBytes(precise: false);
     var sw = Stopwatch.StartNew();
 
     for (int i = 0; i < iterations; i++)
@@ -154,37 +454,39 @@ void PerformanceBenchmark()
         ringBuffer.Publish(seq);
     }
 
-    countdownEvent.Wait();
+    bool done = completion.Wait(TimeSpan.FromSeconds(60));
     sw.Stop();
+    long allocated = GC.GetTotalAllocatedBytes(precise: false) - before;
 
-    double opsPerSec = iterations / sw.Elapsed.TotalSeconds;
-    double latencyNs = sw.Elapsed.TotalMilliseconds * 1_000_000 / iterations;
+    Console.WriteLine($"  이벤트     : {iterations:N0}");
+    Console.WriteLine($"  경과       : {sw.Elapsed.TotalMilliseconds:F2} ms");
+    Console.WriteLine($"  처리량     : {iterations / sw.Elapsed.TotalSeconds:N0} ops/sec");
+    Console.WriteLine($"  평균 지연  : {sw.Elapsed.TotalMilliseconds * 1_000_000 / iterations:F1} ns/op");
+    Console.WriteLine($"  할당       : {allocated:N0} bytes ({(double)allocated / iterations:F4} B/event)");
+    Console.WriteLine(done ? "  → 전량 처리 확인" : "  → 타임아웃! 유실 발생");
 
-    Console.WriteLine($"  Events:        {iterations:N0}");
-    Console.WriteLine($"  Elapsed:       {sw.Elapsed.TotalMilliseconds:F2} ms");
-    Console.WriteLine($"  Throughput:    {opsPerSec:N0} ops/sec");
-    Console.WriteLine($"  Avg Latency:   {latencyNs:F1} ns/op");
-
-    disruptor.Shutdown();
+    disruptor.Shutdown(TimeSpan.FromSeconds(10));
 }
 
-/// <summary>다중 프로듀서 예제</summary>
-void MultiProducerExample()
+// =====================================================
+// 예제 10: 다중 프로듀서 무결성 검증 (백프레셔 회귀 테스트)
+// =====================================================
+void MultiProducerIntegrityCheck()
 {
-    Console.WriteLine("--- Example 4: Multi-Producer ---");
+    Console.WriteLine("--- 예제 10: 다중 프로듀서 무결성 (링을 작게 잡아 백프레셔 유발) ---");
 
-    const int producerCount = 4;
+    const int producerCount = 8;
     const int eventsPerProducer = 100_000;
-    var allDone = new CountdownEvent(1);
-    long totalExpected = producerCount * eventsPerProducer;
+    const int ringSize = 1024;   // 일부러 작게 — 여기가 결함이 드러나는 조건
+
+    long totalExpected = (long)producerCount * eventsPerProducer;
+    using var completion = new ManualResetEventSlim(false);
 
     using var disruptor = new Disruptor<OrderEvent>(
-        () => new OrderEvent(),
-        ringBufferSize: 1024 * 64,
-        producerType: ProducerType.Multi, // 다중 프로듀서!
-        waitStrategy: new BlockingWaitStrategy());
+        () => new OrderEvent(), ringSize, ProducerType.Multi, new YieldingWaitStrategy(),
+        new DisruptorOptions { Name = "mp-integrity", AutoClearSlots = false });
 
-    var handler = new BenchmarkHandler(totalExpected, allDone);
+    var handler = new IntegrityHandler(totalExpected, completion);
     disruptor.HandleEventsWith(handler);
 
     var ringBuffer = disruptor.Start();
@@ -203,138 +505,298 @@ void MultiProducerExample()
                 try
                 {
                     var evt = ringBuffer[seq];
-                    evt.OrderId = producerId * 1_000_000L + i;
-                    evt.Symbol = $"P{producerId}";
-                    evt.Price = i;
-                    evt.Quantity = 1;
+                    evt.OrderId = seq;                // 슬롯에 자기 시퀀스를 기록
+                    evt.Symbol = "P";
+                    evt.Quantity = producerId;
                 }
                 finally
                 {
                     ringBuffer.Publish(seq);
                 }
             }
-        });
+        })
+        { IsBackground = true };
         producers[p].Start();
     }
 
-    allDone.Wait(TimeSpan.FromSeconds(10));
+    foreach (var t in producers) t.Join();
+
+    bool done = completion.Wait(TimeSpan.FromSeconds(30));
     sw.Stop();
 
-    double opsPerSec = totalExpected / sw.Elapsed.TotalSeconds;
-    Console.WriteLine($"  Producers:     {producerCount}");
-    Console.WriteLine($"  Total Events:  {totalExpected:N0}");
-    Console.WriteLine($"  Elapsed:       {sw.Elapsed.TotalMilliseconds:F2} ms");
-    Console.WriteLine($"  Throughput:    {opsPerSec:N0} ops/sec");
+    disruptor.Shutdown(TimeSpan.FromSeconds(10));
 
-    disruptor.Shutdown();
+    Console.WriteLine($"  프로듀서   : {producerCount}, 링 크기: {ringSize}");
+    Console.WriteLine($"  기대       : {totalExpected:N0}건");
+    Console.WriteLine($"  소비       : {handler.Count:N0}건 (유실 {totalExpected - handler.Count:N0})");
+    Console.WriteLine($"  슬롯 덮어쓰기: {handler.Mismatches:N0}회");
+    Console.WriteLine($"  경과       : {sw.Elapsed.TotalMilliseconds:F2} ms " +
+                      $"({handler.Count / sw.Elapsed.TotalSeconds:N0} ops/sec)");
+    Console.WriteLine(done && handler.Count == totalExpected && handler.Mismatches == 0
+        ? "  → 유실 0, 덮어쓰기 0"
+        : "  → 결함 회귀! 백프레셔가 동작하지 않습니다");
 }
 
-
-// 예제 1: 기본 사용법
-BasicExample();
-
-Console.WriteLine();
-
-// 예제 2: 의존성 그래프
-DependencyGraphExample();
-
-Console.WriteLine();
-
-// 예제 3: 성능 벤치마크
-PerformanceBenchmark();
-
-Console.WriteLine();
-
-// 예제 4: 다중 프로듀서
-MultiProducerExample();
-
-
 // =====================================================
-// 이벤트 및 핸들러 클래스 정의
+// 이벤트 및 핸들러 정의
 // =====================================================
 
-public class OrderEvent
+public sealed class OrderEvent : IClearable
 {
     public long OrderId { get; set; }
+    public int RoomId { get; set; }
     public string Symbol { get; set; } = string.Empty;
     public double Price { get; set; }
     public int Quantity { get; set; }
+    public byte[]? Payload { get; set; }
 
+    /// <summary>
+    /// 슬롯이 재사용되기 전까지 외부 참조를 붙들지 않도록 프레임워크가 호출한다.
+    /// 이것이 없으면 객체 수명이 링 버퍼 한 바퀴만큼 연장된다.
+    /// </summary>
     public void Clear()
     {
-        OrderId = 0;
-        Symbol = string.Empty;
-        Price = 0;
-        Quantity = 0;
+        if (Payload is not null)
+        {
+            ArrayPool<byte>.Shared.Return(Payload);
+            Payload = null;
+        }
     }
 
     public override string ToString()
         => $"Order[{OrderId}] {Symbol} {Quantity}@{Price:F2}";
 }
 
-/// <summary>저널링 핸들러 - 이벤트를 로그에 기록</summary>
-public class JournalHandler : IEventHandler<OrderEvent>
+public sealed class PrintHandler : IEventHandler<OrderEvent>
 {
     public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
-    {
-        // 실제로는 파일이나 DB에 기록
-        // Console.WriteLine($"  [Journal] seq={sequence}: {data}");
-    }
+        => Console.WriteLine($"  [Consumer] seq={sequence}: {data}");
 }
 
-/// <summary>복제 핸들러 - 이벤트를 복제</summary>
-public class ReplicationHandler : IEventHandler<OrderEvent>
+public sealed class JournalCountHandler : IEventHandler<OrderEvent>
 {
+    private long _count;
+    public long Count => Volatile.Read(ref _count);
     public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
-    {
-        // 실제로는 다른 노드에 복제
-        // Console.WriteLine($"  [Replication] seq={sequence}: {data}");
-    }
+        => Interlocked.Increment(ref _count);
 }
 
-/// <summary>비즈니스 로직 핸들러 - 실제 주문 처리</summary>
-public class BusinessLogicHandler : IEventHandler<OrderEvent>
+public sealed class ReplicationHandler : IEventHandler<OrderEvent>
+{
+    private long _count;
+    public long Count => Volatile.Read(ref _count);
+    public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
+        => Interlocked.Increment(ref _count);
+}
+
+public sealed class BusinessLogicHandler : IEventHandler<OrderEvent>
 {
     private long _count;
 
-    public long Count => _count;
+    public long Count => Volatile.Read(ref _count);
+    public long MaxBatch { get; private set; }
+
+    public void OnBatchStart(long batchSize)
+    {
+        if (batchSize > MaxBatch) MaxBatch = batchSize;
+    }
+
+    public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
+        => Interlocked.Increment(ref _count);
+}
+
+public sealed class SlowBusinessHandler : IEventHandler<OrderEvent>
+{
+    private readonly int _sleepMs;
+    private long _count;
+
+    public SlowBusinessHandler(int sleepMs) => _sleepMs = sleepMs;
+
+    public long Count => Volatile.Read(ref _count);
 
     public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
     {
-        // 실제 비즈니스 로직
+        Thread.Sleep(_sleepMs);
         Interlocked.Increment(ref _count);
     }
 }
 
-public class PrintHandler : IEventHandler<OrderEvent>
+public sealed class BenchmarkHandler : IEventHandler<OrderEvent>
 {
+    private readonly ManualResetEventSlim _completion;
+    private long _remaining;
+
+    public BenchmarkHandler(long expected, ManualResetEventSlim completion)
+    {
+        _remaining = expected;
+        _completion = completion;
+    }
+
+    public void Reset(long expected) => Volatile.Write(ref _remaining, expected);
+
     public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
     {
-        Console.WriteLine($"  [Consumer] seq={sequence}: {data}");
+        // 단일 컨슈머이므로 Interlocked 없이 감소시켜도 안전하다 (측정 오버헤드 제거).
+        if (--_remaining == 0)
+            _completion.Set();
     }
 }
 
-public class BenchmarkHandler : IEventHandler<OrderEvent>
+public sealed class IntegrityHandler : IEventHandler<OrderEvent>
 {
-    private long _remaining;
-    private CountdownEvent _latch;
+    private readonly long _expected;
+    private readonly ManualResetEventSlim _completion;
+    private long _count;
+    private long _mismatches;
 
-    public BenchmarkHandler(long expected, CountdownEvent latch)
+    public IntegrityHandler(long expected, ManualResetEventSlim completion)
     {
-        _remaining = expected;
-        _latch = latch;
+        _expected = expected;
+        _completion = completion;
     }
 
-    public void Reset(long expected)
-    {
-        _remaining = expected;
-    }
+    public long Count => Volatile.Read(ref _count);
+    public long Mismatches => Volatile.Read(ref _mismatches);
 
     public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
     {
-        if (Interlocked.Decrement(ref _remaining) == 0)
+        if (data.OrderId != sequence)
+            _mismatches++;
+
+        if (++_count == _expected)
+            _completion.Set();
+    }
+}
+
+/// <summary>
+/// 이벤트 소비와 고정 틱 시뮬레이션을 한 스레드에서 결합한다.
+/// 이벤트가 없어도 OnTimeout 이 호출되므로 틱이 밀리지 않는다.
+/// </summary>
+public sealed class TickedRoomHandler : IEventHandler<OrderEvent>
+{
+    private readonly Dictionary<int, int> _roomCommandCounts = new();
+    private readonly List<(int room, long orderId)> _pending = new(256);
+    private readonly FixedTickDriver _driver;
+
+    public TickedRoomHandler()
+    {
+        _driver = FixedTickDriver.At60Hz(_ => Simulate());
+    }
+
+    public long TickCount => _driver.CurrentTick;
+    public long SkippedTicks => _driver.SkippedTicks;
+
+    public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
+    {
+        // 커맨드를 즉시 실행하지 않고 현재 틱 버킷에 모은다 -> 틱 내 결정론 확보
+        _pending.Add((data.RoomId, data.OrderId));
+
+        if (endOfBatch)
+            _driver.TryAdvance();
+    }
+
+    /// <summary>이벤트가 없어도 호출된다 (TimeoutBlockingWaitStrategy).</summary>
+    public void OnTimeout(long lastProcessedSequence) => _driver.TryAdvance();
+
+    private void Simulate()
+    {
+        foreach (var (room, _) in _pending)
+            _roomCommandCounts[room] = _roomCommandCounts.GetValueOrDefault(room) + 1;
+
+        _pending.Clear();
+        // 실제 게임 서버라면 여기서 룸별 시뮬레이션 스텝 + 스냅샷 배치 송신을 수행한다.
+    }
+}
+
+/// <summary>샤드 하나를 담당하는 핸들러. 룸별 순서 위반을 검출한다.</summary>
+public sealed class RoomShardHandler : IEventHandler<OrderEvent>
+{
+    private readonly Dictionary<int, long> _lastOrderPerRoom = new();
+    private long _count;
+    private long _violations;
+
+    public long Count => Volatile.Read(ref _count);
+    public long OrderViolations => Volatile.Read(ref _violations);
+    public int RoomCount => _lastOrderPerRoom.Count;
+
+    public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
+    {
+        // 핸들러는 샤드당 하나이므로 이 사전에 대한 접근은 단일 스레드다.
+        if (_lastOrderPerRoom.TryGetValue(data.RoomId, out long last) && data.OrderId <= last)
+            _violations++;
+
+        _lastOrderPerRoom[data.RoomId] = data.OrderId;
+        _count++;
+    }
+}
+
+/// <summary>순서가 필요 없는 느린 I/O 를 담당하는 워커.</summary>
+public sealed class DbWriteWorker : IWorkHandler<OrderEvent>
+{
+    private readonly int _index;
+    private long _handled;
+
+    public DbWriteWorker(int index) => _index = index;
+
+    public long Handled => Volatile.Read(ref _handled);
+
+    public void OnEvent(OrderEvent evt)
+    {
+        // 실제로는 DB 배치 INSERT / 외부 API 호출
+        Thread.SpinWait(20);
+        Interlocked.Increment(ref _handled);
+    }
+}
+
+/// <summary>리플레이 검증용 월드 상태.</summary>
+public sealed class WorldState
+{
+    private readonly long[] _rooms = new long[8];
+
+    public void Apply(int roomId, long orderId, int quantity)
+        => _rooms[roomId & 7] = _rooms[roomId & 7] * 31 + orderId * quantity + 7;
+
+    public long Checksum
+    {
+        get
         {
-            _latch.Signal();
+            long h = 17;
+            foreach (long v in _rooms) h = h * 31 + v;
+            return h;
         }
+    }
+}
+
+public sealed class WorldUpdateHandler : IEventHandler<OrderEvent>
+{
+    private readonly WorldState _world;
+
+    public WorldUpdateHandler(WorldState world) => _world = world;
+
+    public void OnEvent(OrderEvent data, long sequence, bool endOfBatch)
+        => _world.Apply(data.RoomId, data.OrderId, data.Quantity);
+}
+
+/// <summary>저널 직렬화/역직렬화.</summary>
+public sealed class OrderEventCodec : IJournalSerializer<OrderEvent>, IJournalDeserializer<OrderEvent>
+{
+    private const int RecordSize = 16;
+
+    public int Serialize(OrderEvent evt, Span<byte> destination)
+    {
+        if (destination.Length < RecordSize)
+            return -1;
+
+        BinaryPrimitives.WriteInt64LittleEndian(destination, evt.OrderId);
+        BinaryPrimitives.WriteInt32LittleEndian(destination[8..], evt.RoomId);
+        BinaryPrimitives.WriteInt32LittleEndian(destination[12..], evt.Quantity);
+        return RecordSize;
+    }
+
+    public void Deserialize(ReadOnlySpan<byte> source, OrderEvent target)
+    {
+        target.OrderId = BinaryPrimitives.ReadInt64LittleEndian(source);
+        target.RoomId = BinaryPrimitives.ReadInt32LittleEndian(source[8..]);
+        target.Quantity = BinaryPrimitives.ReadInt32LittleEndian(source[12..]);
     }
 }

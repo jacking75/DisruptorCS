@@ -1,6 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+using Disruptor.WaitStrategy;
 
 namespace Disruptor;
 
@@ -13,20 +11,17 @@ public interface ISequenceBarrier
     /// <summary>
     /// 주어진 시퀀스가 소비 가능해질 때까지 대기합니다.
     /// </summary>
-    long WaitFor(long sequence);
+    /// <remarks>
+    /// 종료/타임아웃은 예외가 아니라 <see cref="SequenceWaitResult"/>로 표현됩니다.
+    /// </remarks>
+    SequenceWaitResult WaitFor(long sequence, CancellationToken cancellationToken);
 
     /// <summary>현재 커서 위치를 반환합니다.</summary>
     long Cursor { get; }
 
-    /// <summary>알림 상태인지 확인합니다.</summary>
-    bool IsAlerted { get; }
+    /// <summary>이 배리어가 추적하는 의존 대상.</summary>
+    DependentSequenceGroup Dependents { get; }
 
-    /// <summary>알림 상태를 설정합니다.</summary>
-    void Alert();
-
-    /// <summary>알림 상태를 해제합니다.</summary>
-    void ClearAlert();
-
-    /// <summary>알림 상태이면 AlertException을 던집니다.</summary>
-    void CheckAlert();
+    /// <summary>이 배리어가 사용하는 대기 전략.</summary>
+    IWaitStrategy WaitStrategy { get; }
 }

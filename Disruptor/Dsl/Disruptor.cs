@@ -1,194 +1,238 @@
 using Disruptor.WaitStrategy;
+using Disruptor.Work;
 
 namespace Disruptor.Dsl;
 
 /// <summary>
 /// Disruptor DSL. 간편하게 링 버퍼와 컨슈머를 설정할 수 있습니다.
 /// </summary>
-public sealed class Disruptor<T> : IDisposable where T : class
+public sealed class Disruptor<T> : DisruptorBase where T : class
 {
     private readonly RingBuffer<T> _ringBuffer;
-    private readonly List<BatchEventProcessor<T>> _processors = new();
-    private readonly List<Thread> _threads = new();
+    private readonly List<BatchEventProcessor<T>> _batchProcessors = new();
+    private readonly List<WorkerPool<T>> _workerPools = new();
+
     private IExceptionHandler<T>? _defaultExceptionHandler;
-    private bool _started;
 
     public Disruptor(
         Func<T> eventFactory,
         int ringBufferSize,
         ProducerType producerType = ProducerType.Single,
-        IWaitStrategy? waitStrategy = null)
+        IWaitStrategy? waitStrategy = null,
+        DisruptorOptions? options = null)
+        : base(options ?? DisruptorOptions.Default)
     {
-        waitStrategy ??= new BlockingWaitStrategy();
-        _ringBuffer = RingBuffer<T>.Create(producerType, eventFactory,
-                                            ringBufferSize, waitStrategy);
+        waitStrategy ??= Options.CreateDefaultWaitStrategy();
+
+        _ringBuffer = RingBuffer<T>.Create(
+            producerType, eventFactory, ringBufferSize, waitStrategy,
+            new SequencerOptions
+            {
+                PipelineName = Options.Name,
+                Backoff = Options.ProducerBackoff,
+                StallThreshold = Options.StallThreshold,
+                OnStall = info =>
+                {
+                    Metrics?.RecordStall(info);
+                    Options.OnStall?.Invoke(info);
+                },
+                ValidateSingleProducerThread = Options.ValidateSingleProducerThread,
+            });
     }
 
     /// <summary>링 버퍼에 접근합니다.</summary>
     public RingBuffer<T> RingBuffer => _ringBuffer;
 
+    protected override IRingBufferCore Core => _ringBuffer;
+
+    protected override bool HasRegisteredWork => base.HasRegisteredWork || _workerPools.Count > 0;
+
     /// <summary>
-    /// 기본 예외 핸들러를 설정합니다. Start() 호출 전에 설정해야 합니다.
-    /// 이후 등록되는 모든 프로세서에 적용됩니다.
+    /// 기본 예외 핸들러를 설정합니다. 이후 등록되는 모든 프로세서에 적용되며,
+    /// 이미 등록된 프로세서에도 소급 적용됩니다.
     /// </summary>
     public void SetDefaultExceptionHandler(IExceptionHandler<T> exceptionHandler)
     {
+        ArgumentNullException.ThrowIfNull(exceptionHandler);
         _defaultExceptionHandler = exceptionHandler;
 
-        // 이미 등록된 프로세서에도 적용
-        foreach (var processor in _processors)
-        {
+        foreach (var processor in _batchProcessors)
             processor.SetExceptionHandler(exceptionHandler);
-        }
+
+        foreach (var pool in _workerPools)
+            pool.SetExceptionHandler(exceptionHandler);
     }
 
     /// <summary>
     /// 이벤트 핸들러를 등록합니다. 반환값으로 의존성 체인을 구성할 수 있습니다.
     /// </summary>
     public EventHandlerGroup HandleEventsWith(params IEventHandler<T>[] handlers)
-    {
-        return CreateEventProcessors(Array.Empty<Sequence>(), handlers);
-    }
+        => CreateEventProcessors([], handlers);
 
-    /// <summary>
-    /// 의존성이 있는 이벤트 핸들러 그룹.
-    /// </summary>
+    /// <summary>이벤트를 여러 워커에게 분배하는 워커 풀을 등록합니다.</summary>
+    public EventHandlerGroup HandleEventsWithWorkerPool(
+        int workerCount, Func<int, IWorkHandler<T>> workHandlerFactory)
+        => CreateWorkerPool([], workerCount, workHandlerFactory);
+
+    /// <summary>의존성이 있는 이벤트 핸들러 그룹.</summary>
     public sealed class EventHandlerGroup
     {
         private readonly Disruptor<T> _disruptor;
-        private readonly Sequence[] _sequences;
 
         internal EventHandlerGroup(Disruptor<T> disruptor, Sequence[] sequences)
         {
             _disruptor = disruptor;
-            _sequences = sequences;
+            Sequences = sequences;
         }
 
-        /// <summary>
-        /// 이 그룹이 완료된 후에 실행될 핸들러를 등록합니다.
-        /// </summary>
+        /// <summary>이 그룹의 시퀀스들.</summary>
+        public Sequence[] Sequences { get; }
+
+        /// <summary>이 그룹이 완료된 후에 실행될 핸들러를 등록합니다.</summary>
         public EventHandlerGroup Then(params IEventHandler<T>[] handlers)
-        {
-            return _disruptor.CreateEventProcessors(_sequences, handlers);
-        }
+            => _disruptor.CreateEventProcessors(Sequences, handlers);
+
+        /// <summary>이 그룹이 완료된 후에 실행될 워커 풀을 등록합니다.</summary>
+        public EventHandlerGroup ThenWorkerPool(int workerCount, Func<int, IWorkHandler<T>> workHandlerFactory)
+            => _disruptor.CreateWorkerPool(Sequences, workerCount, workHandlerFactory);
     }
 
     private EventHandlerGroup CreateEventProcessors(
         Sequence[] barrierSequences,
         IEventHandler<T>[] handlers)
     {
-        if (_started)
-            throw new InvalidOperationException(
-                "Cannot add handlers after the Disruptor has started");
+        ArgumentNullException.ThrowIfNull(handlers);
+        if (handlers.Length == 0)
+            throw new ArgumentException("최소 1개의 핸들러가 필요합니다.", nameof(handlers));
+
+        EnsureNotStarted();
 
         var processorSequences = new Sequence[handlers.Length];
 
         for (int i = 0; i < handlers.Length; i++)
         {
             var barrier = _ringBuffer.NewBarrier(barrierSequences);
-            var processor = new BatchEventProcessor<T>(
-                _ringBuffer, barrier, handlers[i]);
+            var processor = new BatchEventProcessor<T>(_ringBuffer, barrier, handlers[i])
+            {
+                Metrics = Metrics,
+            };
 
-            if (_defaultExceptionHandler != null)
+            if (_defaultExceptionHandler is not null)
                 processor.SetExceptionHandler(_defaultExceptionHandler);
 
-            _processors.Add(processor);
+            processor.Halted += RaiseProcessorHalted;
+
+            _batchProcessors.Add(processor);
+            RegisteredProcessors.Add(processor);
             processorSequences[i] = processor.Sequence;
+
+            RegisterProcessorDiagnostics(processor);
         }
 
-        // 마지막 단계의 시퀀스만 게이팅 시퀀스로 등록
-        // (이전 단계의 것은 제거 — 리프 노드 최적화)
-        foreach (var seq in barrierSequences)
-        {
-            _ringBuffer.RemoveGatingSequence(seq);
-        }
-        _ringBuffer.AddGatingSequences(processorSequences);
+        UpdateGatingSequences(barrierSequences, processorSequences);
 
         return new EventHandlerGroup(this, processorSequences);
     }
 
-    /// <summary>Disruptor를 시작합니다.</summary>
-    public RingBuffer<T> Start()
+    private EventHandlerGroup CreateWorkerPool(
+        Sequence[] barrierSequences,
+        int workerCount,
+        Func<int, IWorkHandler<T>> workHandlerFactory)
     {
-        if (_started)
-            throw new InvalidOperationException("Already started");
+        EnsureNotStarted();
 
-        _started = true;
+        var barrier = _ringBuffer.NewBarrier(barrierSequences);
+        var pool = new WorkerPool<T>(_ringBuffer, barrier, workHandlerFactory, workerCount);
 
-        foreach (var processor in _processors)
+        if (_defaultExceptionHandler is not null)
+            pool.SetExceptionHandler(_defaultExceptionHandler);
+
+        pool.SetMetrics(Metrics);
+
+        foreach (var processor in pool.Processors)
         {
-            var thread = new Thread(processor.Run)
-            {
-                IsBackground = true,
-                Name = $"Disruptor-{typeof(T).Name}-{_threads.Count}"
-            };
-            _threads.Add(thread);
-            thread.Start();
+            processor.Halted += RaiseProcessorHalted;
+            _ringBuffer.SetGatingSequenceLabel(processor.Sequence, processor.Name);
         }
 
+        _workerPools.Add(pool);
+
+        var poolSequences = pool.Sequences;
+        UpdateGatingSequences(barrierSequences, poolSequences);
+
+        return new EventHandlerGroup(this, poolSequences);
+    }
+
+    /// <summary>Disruptor를 시작합니다. 모든 프로세서가 이벤트 루프에 진입한 뒤 반환합니다.</summary>
+    public RingBuffer<T> Start()
+    {
+        StartProcessorThreads();
         return _ringBuffer;
     }
 
-    /// <summary>
-    /// Disruptor를 정지합니다.
-    /// 타임아웃 내에서 미처리 이벤트를 모두 소비한 후 종료합니다.
-    /// </summary>
-    public void Shutdown(TimeSpan? timeout = null)
+    protected override void OnBeforeStart() => ConfigureSlotClearing();
+
+    protected override void OnAfterStart()
     {
-        if (!_started)
+        foreach (var pool in _workerPools)
+            pool.Start(ShutdownSource.Token, Options.ThreadOptions);
+    }
+
+    protected override void OnHalt()
+    {
+        foreach (var pool in _workerPools)
+            pool.Halt();
+    }
+
+    protected override long MinimumProcessorSequence()
+    {
+        long min = base.MinimumProcessorSequence();
+
+        foreach (var pool in _workerPools)
+        {
+            foreach (var seq in pool.Sequences)
+                min = Math.Min(min, seq.Value);
+        }
+
+        return min;
+    }
+
+    /// <summary>
+    /// 슬롯 자동 정리를 설정합니다.
+    /// 리프 프로세서가 정확히 하나일 때만 활성화합니다(여러 개면 정리 시점에 경쟁이 발생).
+    /// </summary>
+    private void ConfigureSlotClearing()
+    {
+        if (!Options.AutoClearSlots)
             return;
 
-        timeout ??= TimeSpan.FromSeconds(5);
-        var deadline = DateTime.UtcNow + timeout.Value;
+        var gating = _ringBuffer.GetGatingSequences();
+        var leaves = _batchProcessors.Where(p => Array.IndexOf(gating, p.Sequence) >= 0).ToList();
+        bool workerPoolIsLeaf = _workerPools.Any(pool => pool.Sequences.Any(s => Array.IndexOf(gating, s) >= 0));
 
-        // Phase 1: 링 버퍼의 미처리 이벤트를 모두 소비할 때까지 대기
-        DrainProcessors(deadline);
-
-        // Phase 2: 프로세서 중지
-        foreach (var processor in _processors)
+        if (leaves.Count == 1 && !workerPoolIsLeaf)
         {
-            processor.Halt();
+            leaves[0].ClearAfterProcess = true;
         }
-
-        // Phase 3: 스레드 종료 대기
-        foreach (var thread in _threads)
+        else if (leaves.Count > 1 || workerPoolIsLeaf)
         {
-            var remaining = deadline - DateTime.UtcNow;
-            if (remaining > TimeSpan.Zero)
-                thread.Join(remaining);
-        }
+            string reason = workerPoolIsLeaf
+                ? "워커 풀이 마지막 단계라"
+                : $"마지막 단계 핸들러가 {leaves.Count}개라";
 
-        _started = false;
-    }
-
-    /// <summary>
-    /// 모든 프로세서가 커서까지 소비할 때까지 대기합니다.
-    /// </summary>
-    private void DrainProcessors(DateTime deadline)
-    {
-        long cursor = _ringBuffer.Cursor;
-        if (cursor < 0)
-            return; // 게시된 이벤트 없음
-
-        while (DateTime.UtcNow < deadline)
-        {
-            bool allCaughtUp = true;
-            foreach (var processor in _processors)
-            {
-                if (processor.Sequence.Value < cursor)
-                {
-                    allCaughtUp = false;
-                    break;
-                }
-            }
-            if (allCaughtUp)
-                break;
-            Thread.Sleep(1);
+            Console.Error.WriteLine(
+                $"[Disruptor][WARN] '{Name}': {reason} 슬롯 자동 정리를 비활성화합니다 " +
+                "(동시에 읽는 핸들러가 있으면 정리 시점에 경쟁이 발생). " +
+                "마지막 핸들러에서 직접 참조를 해제하세요 " +
+                "— 그렇지 않으면 객체 수명이 링 버퍼 한 바퀴만큼 연장됩니다.");
         }
     }
 
-    public void Dispose()
+    public override void Dispose()
     {
-        Shutdown();
+        base.Dispose();
+
+        foreach (var pool in _workerPools)
+            pool.Dispose();
     }
 }

@@ -1,27 +1,34 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
 namespace Disruptor.WaitStrategy;
 
 /// <summary>
-/// SpinWait을 사용하는 전략. SleepingWaitStrategy에 해당합니다.
+/// .NET의 <see cref="SpinWait"/>에 위임하는 전략.
+/// 스핀 → Yield → Sleep(0) 순으로 자동 에스컬레이션합니다.
 /// </summary>
+/// <remarks>
+/// <see cref="SpinWait.SpinOnce(int)"/>에 <c>sleep1Threshold: -1</c>을 넘겨
+/// <c>Thread.Sleep(1)</c> 단계를 비활성화합니다. 이것을 하지 않으면 Windows의
+/// 기본 타이머 분해능(15.6ms) 때문에 대기 한 번이 15ms 이상 걸립니다
+/// (60Hz 게임 서버의 틱 예산 16.6ms를 통째로 소모).
+/// </remarks>
 public sealed class SpinWaitWaitStrategy : IWaitStrategy
 {
-    public long WaitFor(long sequence, Sequence cursor, Sequence dependentSequence,
-                        ISequenceBarrier barrier)
+    public bool IsBlockingStrategy => false;
+
+    public SequenceWaitResult WaitFor(long sequence, DependentSequenceGroup dependents,
+                                      CancellationToken cancellationToken)
     {
-        long availableSequence;
+        long available;
         var spinWait = new SpinWait();
 
-        while ((availableSequence = dependentSequence.Value) < sequence)
+        while ((available = dependents.Value) < sequence)
         {
-            barrier.CheckAlert();
-            spinWait.SpinOnce();
+            if (cancellationToken.IsCancellationRequested)
+                return SequenceWaitResult.Cancelled;
+
+            spinWait.SpinOnce(sleep1Threshold: -1);
         }
 
-        return availableSequence;
+        return available;
     }
 
     public void SignalAllWhenBlocking()
