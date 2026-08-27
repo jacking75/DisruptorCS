@@ -4,7 +4,10 @@ This repository does **not** use CI. Every gate below is run manually, which mak
 down non-optional: an unwritten manual step is a step that eventually gets skipped.
 
 Versioning is driven by [MinVer](https://github.com/adamralph/minver) from git tags —
-tag `v1.2.3` produces package version `1.2.3`. Untagged builds get a `-preview.0` suffix.
+tag `v1.2.3` produces package version `1.2.3`. Untagged builds fall back to the
+`MinVerMinimumMajorMinor` floor in `Directory.Build.props` and get a `-preview.0.N` suffix, so
+they can never be mistaken for a release. Bump that floor in the same commit that opens a new
+minor version.
 
 ---
 
@@ -85,39 +88,82 @@ dotnet run --project Disruptor.Benchmarks -c Release -- --filter '*Comparison*' 
 
 ## 6. Package gate
 
-```bash
-dotnet pack Disruptor/Disruptor.csproj -c Release -o ./artifacts
-dotnet pack Disruptor.Extensions.Hosting/Disruptor.Extensions.Hosting.csproj -c Release -o ./artifacts
+Packaging is scripted so the easy-to-forget checks cannot be forgotten. The script builds,
+packs both projects, and then opens each `.nupkg` to confirm the analyzer, the package README,
+the icon, both target frameworks, the XML docs, and the symbol package are actually inside.
 
-# Verify the analyzer actually shipped inside the package.
-unzip -l artifacts/DisruptorCS.*.nupkg | grep analyzers
+```powershell
+# 태그를 찍기 전 예행 연습 (버전을 강제)
+./build/pack.ps1 -Version 0.10.0
+
+# 태그를 찍은 뒤 실제 산출물 (MinVer 가 git 태그에서 버전을 읽는다)
+./build/pack.ps1
 ```
 
-- [ ] `analyzers/dotnet/cs/Disruptor.Analyzers.dll` present in the package
-- [ ] `README.md` present in the package
-- [ ] `.snupkg` symbol packages produced
+- [ ] `build/pack.ps1` exits 0 — every `[OK]`, no `[누락]`
+- [ ] The version on the produced files is the version you intend to ship
 
-## 7. Documentation gate
+Version comes from MinVer: the tag `v0.10.0` produces `0.10.0`. Without a tag, the
+`MinVerMinimumMajorMinor` floor in `Directory.Build.props` produces `0.10.0-preview.0.N`, so an
+accidental untagged pack is obviously a pre-release rather than silently a wrong version.
 
-- [ ] `CHANGELOG.md` updated (Keep a Changelog format)
+## 7. Consumer gate
+
+A package that builds is not the same as a package that works once installed. Install it from a
+local feed into a throwaway project — this is what catches a missing dependency, an analyzer that
+does not load, or a documented snippet that does not compile.
+
+```powershell
+$feed = (Resolve-Path ./artifacts).Path
+$scratch = Join-Path $env:TEMP 'disruptorcs-consumer'
+Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+dotnet new console -o $scratch
+Push-Location $scratch
+dotnet nuget add source $feed --name local
+dotnet add package DisruptorCS --version 0.10.0
+dotnet add package DisruptorCS.Extensions.Hosting --version 0.10.0
+```
+
+- [ ] A quickstart snippet copied from `Disruptor/PACKAGE.md` compiles and runs
+- [ ] A deliberate ring size of `1000` produces **DISR004** — the analyzer shipped and loads
+- [ ] `services.AddDisruptor<T>(...)` resolves **without** an extra `using` — the extension lives
+      in `Microsoft.Extensions.DependencyInjection`
+
+## 8. Documentation gate
+
+- [ ] `CHANGELOG.md` updated (Keep a Changelog format) and the `[Unreleased]` section cut to the
+      new version, with the compare/tag links at the bottom updated
 - [ ] `README.md` benchmark numbers match the run from step 5
 - [ ] `README.ko.md` kept in sync with `README.md`
+- [ ] `Disruptor/PACKAGE.md` and `Disruptor.Extensions.Hosting/PACKAGE.md` reflect the new
+      version's API — these are what nuget.org renders, and **relative links do not work there**,
+      so every link in them must be absolute
 - [ ] New public API has XML docs
 
-## 8. Ship
+## 9. Ship
 
-```bash
-git tag v0.3.0
+```powershell
+git tag v0.10.0
 git push origin main --tags
 
-dotnet nuget push artifacts/DisruptorCS.0.3.0.nupkg \
-  --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY
-dotnet nuget push artifacts/DisruptorCS.Extensions.Hosting.0.3.0.nupkg \
-  --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY
+./build/pack.ps1                 # 태그가 찍힌 상태에서 다시 만든다
+
+dotnet nuget push artifacts/DisruptorCS.0.10.0.nupkg `
+  --source https://api.nuget.org/v3/index.json --api-key $env:NUGET_API_KEY
+dotnet nuget push artifacts/DisruptorCS.Extensions.Hosting.0.10.0.nupkg `
+  --source https://api.nuget.org/v3/index.json --api-key $env:NUGET_API_KEY
 ```
 
+Push the core package first and let it finish indexing. `DisruptorCS.Extensions.Hosting` depends on
+the exact same version, so pushing it first leaves a package on nuget.org that cannot be restored.
+
+`.snupkg` symbol packages are picked up automatically when they sit next to the `.nupkg`, so there
+is no separate push for them.
+
 - [ ] Tag pushed
-- [ ] Packages pushed
+- [ ] `DisruptorCS` pushed and indexed (visible at <https://www.nuget.org/packages/DisruptorCS/>)
+- [ ] `DisruptorCS.Extensions.Hosting` pushed
+- [ ] Both listing pages render the README and the icon
 - [ ] GitHub Release created from the tag, body excerpted from `CHANGELOG.md`
 
 ---
@@ -126,8 +172,10 @@ dotnet nuget push artifacts/DisruptorCS.Extensions.Hosting.0.3.0.nupkg \
 
 NuGet packages cannot be deleted, only unlisted:
 
-```bash
-dotnet nuget delete DisruptorCS 0.3.0 --source https://api.nuget.org/v3/index.json --api-key $KEY --non-interactive
+```powershell
+dotnet nuget delete DisruptorCS 0.10.0 --source https://api.nuget.org/v3/index.json `
+  --api-key $env:NUGET_API_KEY --non-interactive
 ```
 
-Then ship a fixed patch version immediately. Never reuse a version number.
+Then ship a fixed patch version immediately. Never reuse a version number — nuget.org rejects a
+re-push of an existing version, and any client that already restored the bad one has it cached.

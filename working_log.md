@@ -1,5 +1,24 @@
 # 작업 로그
 
+## 2026-08-27 15:57 KST — NuGet 배포 준비 (0.10.0)
+
+`DisruptorCS` / `DisruptorCS.Extensions.Hosting` 두 패키지의 nuget.org 등록 준비를 마쳤다.
+`Directory.Build.props` 로 공통 메타데이터(작성자·저작권·아이콘·라이선스·심볼·SourceLink)와
+MinVer 버전 하한 `0.10` 을 한곳에 모아 두 패키지의 버전이 갈라질 수 없게 했고, 기본
+`IsPackable=false` 로 샘플·테스트가 실수로 패키징되지 않게 했다. nuget.org 는 상대 링크를
+복원하지 못하므로 27KB README 대신 절대 링크만 쓰는 패키지 전용 `PACKAGE.md` 를 프로젝트마다
+따로 실었고, 링 버퍼 모티프 아이콘을 생성기(`build/generate-icon.cs`)와 함께 추가했다.
+호스팅 어셈블리 이름을 패키지 ID 와 맞춰 `DisruptorCS.Extensions.Hosting` 으로 통일했고,
+`AddDisruptor<T>()`·`AddDisruptorCheck<T>()` 를 MS 관례대로 `Microsoft.Extensions.DependencyInjection`
+네임스페이스로 옮겼다 — 배포 후에는 breaking change 라 지금이 아니면 못 바꾼다. 이제 `Program.cs`
+에서 별도 `using` 없이 `builder.Services` 에 바로 나타난다(샘플의 using 도 제거).
+`build/pack.ps1` 이 빌드·팩 후 nupkg 를 열어 analyzer·README·아이콘·양쪽 TFM·XML 문서·snupkg
+존재를 검증하며, analyzer DLL 경로가 어긋나면 pack 자체가 실패하도록 `Error` 조건을 넣었다.
+검증: 로컬 피드로 실제 소비자 프로젝트에 설치해 DISR004 발생·`using` 없는 DI 등록·이벤트 소비까지 확인,
+Release/Debug 빌드 경고 0, 테스트 113+20 전부 통과. CHANGELOG 를 `[0.10.0] - 2026-08-27` 로
+확정하고 docs/RELEASE.md 를 9단계(소비자 게이트 추가)로 갱신했다.
+main 에 커밋·푸시까지 완료. 남은 것은 `git tag v0.10.0` → `./build/pack.ps1` → `dotnet nuget push` 뿐이다.
+
 ## 2026-08-27 15:05 KST — IMPROVEMENTS.md 미완 항목 마무리 (샘플 4종·DISR005·Coyote·ValueWorkerPool·POH)
 
 "다한 것인가?" 확인 요청에 따라 감사한 결과, 앞선 로그의 "Wave 1~4 전부 구현"은 과장이었다.

@@ -24,24 +24,12 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
 
-    <!-- 패키징 -->
+    <!-- 패키징. 공통 메타데이터(작성자/라이선스/저장소/아이콘/MinVer)는 Directory.Build.props 에 있다. -->
+    <IsPackable>true</IsPackable>
     <PackageId>DisruptorCS</PackageId>
-    <Authors>DisruptorCS Contributors</Authors>
+    <Title>DisruptorCS</Title>
     <Description>LMAX Disruptor for C#, with a game-server layer: sharding, fixed-tick integration, and deterministic journal/replay.</Description>
-    <PackageTags>disruptor;ringbuffer;lock-free;low-latency;game-server;high-performance</PackageTags>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageProjectUrl>https://github.com/jacking75/DisruptorCS</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/jacking75/DisruptorCS</RepositoryUrl>
-    <RepositoryType>git</RepositoryType>
-    <PublishRepositoryUrl>true</PublishRepositoryUrl>
-    <EmbedUntrackedSources>true</EmbedUntrackedSources>
-    <IncludeSymbols>true</IncludeSymbols>
-    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
-
-    <!-- MinVer: git tag 기반 SemVer. 태그가 없으면 0.0.0-alpha.0.N 이 된다. -->
-    <MinVerTagPrefix>v</MinVerTagPrefix>
-    <MinVerDefaultPreReleaseIdentifiers>preview.0</MinVerDefaultPreReleaseIdentifiers>
+    <PackageTags>disruptor;ringbuffer;lock-free;low-latency;game-server;high-performance;concurrency;queue</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
@@ -53,7 +41,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="../README.md" Pack="true" PackagePath="/" Visible="false" />
+    <!-- nuget.org 는 상대 링크를 저장소로 되돌리지 못한다. 패키지 페이지 전용 README 를 따로 싣는다. -->
+    <None Include="PACKAGE.md" Pack="true" PackagePath="/" Visible="false" />
+    <None Include="../build/icon.png" Pack="true" PackagePath="/" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>
@@ -78,7 +68,12 @@
     <PropertyGroup>
       <_AnalyzerDll>$(MSBuildThisFileDirectory)../Disruptor.Analyzers/bin/$(Configuration)/netstandard2.0/Disruptor.Analyzers.dll</_AnalyzerDll>
     </PropertyGroup>
-    <ItemGroup Condition="Exists('$(_AnalyzerDll)')">
+    <!--
+      Analyzer 가 빠진 패키지는 조용히 기능이 하나 없는 채로 배포된다. 경로가 어긋나면 여기서 멈춘다.
+    -->
+    <Error Condition="!Exists('$(_AnalyzerDll)')"
+           Text="Analyzer assembly not found at $(_AnalyzerDll). Build Disruptor.Analyzers in $(Configuration) before packing." />
+    <ItemGroup>
       <None Include="$(_AnalyzerDll)" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     </ItemGroup>
   </Target>

@@ -6,27 +6,21 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
 
+    <!-- 어셈블리 이름을 패키지 ID 와 맞춘다 (코어 패키지와 같은 규칙). 네임스페이스는 그대로 둔다. -->
+    <AssemblyName>DisruptorCS.Extensions.Hosting</AssemblyName>
+    <RootNamespace>Disruptor.Extensions.Hosting</RootNamespace>
+
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <IsAotCompatible>true</IsAotCompatible>
 
+    <!-- 패키징. 공통 메타데이터는 Directory.Build.props 에 있다. -->
+    <IsPackable>true</IsPackable>
     <PackageId>DisruptorCS.Extensions.Hosting</PackageId>
-    <Authors>DisruptorCS Contributors</Authors>
+    <Title>DisruptorCS.Extensions.Hosting</Title>
     <Description>Microsoft.Extensions integration for DisruptorCS: DI registration, Generic Host lifecycle, and health checks.</Description>
-    <PackageTags>disruptor;dependency-injection;hosting;healthcheck;aspnetcore</PackageTags>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageProjectUrl>https://github.com/jacking75/DisruptorCS</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/jacking75/DisruptorCS</RepositoryUrl>
-    <RepositoryType>git</RepositoryType>
-    <PublishRepositoryUrl>true</PublishRepositoryUrl>
-    <EmbedUntrackedSources>true</EmbedUntrackedSources>
-    <IncludeSymbols>true</IncludeSymbols>
-    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
-
-    <MinVerTagPrefix>v</MinVerTagPrefix>
-    <MinVerDefaultPreReleaseIdentifiers>preview.0</MinVerDefaultPreReleaseIdentifiers>
+    <PackageTags>disruptor;dependency-injection;hosting;healthcheck;aspnetcore;generic-host</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
@@ -42,7 +36,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="../README.md" Pack="true" PackagePath="/" Visible="false" />
+    <None Include="PACKAGE.md" Pack="true" PackagePath="/" Visible="false" />
+    <None Include="../build/icon.png" Pack="true" PackagePath="/" Visible="false" />
   </ItemGroup>
 
 </Project>

@@ -3,7 +3,6 @@ using System.Text.Json;
 using AspNetCoreTelemetry;
 using Disruptor;
 using Disruptor.Dsl;
-using Disruptor.Extensions.Hosting;
 using Disruptor.WaitStrategy;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 

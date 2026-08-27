@@ -1,7 +1,14 @@
-using Microsoft.Extensions.DependencyInjection;
+using Disruptor;
+using Disruptor.Dsl;
+using Disruptor.Extensions.Hosting;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Hosting;
 
-namespace Disruptor.Extensions.Hosting;
+// IServiceCollection / IHealthChecksBuilder 확장은 Microsoft 관례대로
+// Microsoft.Extensions.DependencyInjection 에 둔다. builder.Services 를 쓰는 파일은 이미 이
+// 네임스페이스를 열어 두므로, 사용자가 AddDisruptor 를 찾으려고 별도 using 을 추가할 필요가 없다.
+// (구현 타입은 그대로 Disruptor.Extensions.Hosting 에 있다.)
+namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
 /// <c>IServiceCollection</c> 에 Disruptor 파이프라인을 등록합니다.
@@ -19,7 +26,7 @@ public static class DisruptorServiceCollectionExtensions
     /// <remarks>
     /// 등록되는 것:
     /// <list type="bullet">
-    ///   <item><see cref="Dsl.Disruptor{T}"/> — 싱글턴</item>
+    ///   <item><see cref="Disruptor{T}"/> — 싱글턴</item>
     ///   <item><see cref="RingBuffer{T}"/> — 싱글턴 (게시 측에서 바로 주입받아 쓸 수 있게)</item>
     ///   <item><c>IHostedService</c> — <c>StartAsync</c> 에서 Start, <c>StopAsync</c> 에서 드레인 후 Shutdown</item>
     /// </list>
@@ -53,18 +60,17 @@ public static class DisruptorServiceCollectionExtensions
         });
 
         // 게시 측이 RingBuffer 를 바로 주입받을 수 있게 한다.
-        services.AddSingleton(sp => sp.GetRequiredService<Dsl.Disruptor<T>>().RingBuffer);
+        services.AddSingleton(sp => sp.GetRequiredService<Disruptor<T>>().RingBuffer);
 
         // 백프레셔 정책 게이트도 함께 제공한다 — 게임 서버에서는 이게 사실상 기본 게시 경로다.
         services.AddSingleton(sp =>
         {
-            var disruptor = sp.GetRequiredService<Dsl.Disruptor<T>>();
+            var disruptor = sp.GetRequiredService<Disruptor<T>>();
             return new PublishGate<T>(disruptor.RingBuffer, disruptor.Metrics);
         });
 
         services.AddSingleton<DisruptorHostedService<T>>();
-        services.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(
-            sp => sp.GetRequiredService<DisruptorHostedService<T>>());
+        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<DisruptorHostedService<T>>());
 
         return services;
     }
@@ -91,7 +97,7 @@ public static class DisruptorServiceCollectionExtensions
         return builder.Add(new HealthCheckRegistration(
             name ?? $"disruptor-{typeof(T).Name}",
             sp => new DisruptorHealthCheck<T>(
-                sp.GetRequiredService<Dsl.Disruptor<T>>(),
+                sp.GetRequiredService<Disruptor<T>>(),
                 degradedUtilization,
                 unhealthyUtilization),
             failureStatus,

@@ -398,13 +398,15 @@ disruptor.ProcessorHalted += (p, ex) => alerting.Fatal($"핸들러 '{p.Name}' �
 
 ```
 DisruptorCS.slnx
+├── Directory.Build.props       공통 패키지 메타데이터 + MinVer 버전 하한
+├── build/                      pack.ps1 (릴리스 패키징·nupkg 검증), icon.png
 ├── Disruptor/                  라이브러리 (net8.0 / net10.0)
 │   ├── Dsl/                    Disruptor<T>, ValueDisruptor<T>, DisruptorOptions
 │   ├── WaitStrategy/           7종 대기 전략
 │   ├── Work/                   WorkerPool, WorkProcessor, IWorkHandler
 │   └── Game/                   ShardedDisruptor, FixedTickDriver, Journal
 ├── Disruptor.Analyzers/        Roslyn 분석기 (DISR001~005), 패키지에 동봉
-├── Disruptor.Extensions.Hosting/  DI · Generic Host · 헬스체크
+├── Disruptor.Extensions.Hosting/  DI · Generic Host · 헬스체크 (별도 패키지)
 ├── Disruptor.Tests/            xUnit — 113개 테스트
 ├── Disruptor.Analyzers.Tests/  분석기 테스트 — 20개
 ├── Disruptor.Concurrency.Tests/  Coyote 체계적 동시성 모델 — 8종

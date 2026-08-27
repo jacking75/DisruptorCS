@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.10.0] - 2026-08-27
+
+First release published to NuGet, as `DisruptorCS` and `DisruptorCS.Extensions.Hosting`.
+The 0.1.0 and 0.2.0 entries below were development milestones and were never packaged.
+
 ### Added
 
 **Consumption models**
@@ -77,8 +86,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   callback actually needs elapsed time. `SpinOnlyBackoff` never reads the clock.
 - `PublishGate` counters are striped, removing cache-line ping-pong between producers.
 - The assembly is now named `DisruptorCS` (the namespace remains `Disruptor`), so it can sit
-  alongside the official `disruptor-net` package in the same project.
-- Versioning moved to MinVer (git-tag driven).
+  alongside the official `disruptor-net` package in the same project. The companion assembly
+  follows the same rule and is named `DisruptorCS.Extensions.Hosting`.
+- Versioning moved to MinVer (git-tag driven). `Directory.Build.props` carries the shared package
+  metadata and the `0.10` version floor, so the two packages cannot drift apart between releases.
 - `PublishEventScope().Event` is now a property; `GetEvent()` is kept but `[Obsolete]`.
 - `AddDisruptor<T>()` resolves stage handlers with `ActivatorUtilities.GetServiceOrCreateInstance`
   instead of `GetRequiredService`, so a handler no longer has to be registered separately — which is
@@ -87,6 +98,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   workers shared one, so any worker-local state was silently shared across threads.
 - `RingBuffer.PublishedCursor` now documents that it is an O(n) scan and must not be called on a
   hot path.
+- `AddDisruptor<T>()` and `AddDisruptorCheck<T>()` moved to the `Microsoft.Extensions.DependencyInjection`
+  namespace, the convention every other `IServiceCollection` extension follows. They now appear on
+  `builder.Services` without an extra `using`. The implementation types stay in
+  `Disruptor.Extensions.Hosting`.
 
 ### Fixed
 
@@ -165,3 +180,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Initial implementation: ring buffer, single/multi-producer sequencers, sequence barrier,
 four wait strategies, and the DSL.
+
+---
+
+[Unreleased]: https://github.com/jacking75/DisruptorCS/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/jacking75/DisruptorCS/releases/tag/v0.10.0

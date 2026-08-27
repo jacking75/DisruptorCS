@@ -519,6 +519,8 @@ Details: [`docs/analyzers/`](docs/analyzers/).
 
 ```
 DisruptorCS.slnx
+├── Directory.Build.props            Shared package metadata + MinVer version floor
+├── build/                           pack.ps1 (release packaging + nupkg verification), icon.png
 ├── Disruptor/                       Core library (net8.0 / net10.0)
 │   ├── Async/                       AsyncWaitStrategy, AsyncBatchEventProcessor, AsyncBridge
 │   ├── Dsl/                         Disruptor<T>, ValueDisruptor<T>, DisruptorOptions
@@ -526,7 +528,7 @@ DisruptorCS.slnx
 │   ├── Work/                        WorkerPool, WorkProcessor, IWorkHandler
 │   └── Game/                        ShardedDisruptor, FixedTickDriver, Journal, HighResolutionTimerScope
 ├── Disruptor.Analyzers/             Roslyn analyzers (DISR001–005), shipped in the package
-├── Disruptor.Extensions.Hosting/    DI / Generic Host / health checks
+├── Disruptor.Extensions.Hosting/    DI / Generic Host / health checks (a second package)
 ├── Disruptor.Tests/                 xUnit — 113 tests
 ├── Disruptor.Analyzers.Tests/       Analyzer tests — 20 tests
 ├── Disruptor.Concurrency.Tests/     Coyote systematic concurrency models — 8 models
