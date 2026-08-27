@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Disruptor.Dsl;
 using Disruptor.WaitStrategy;
 using Disruptor.Work;
@@ -9,8 +10,23 @@ namespace Disruptor.Extensions.Hosting;
 /// DI 컨테이너에서 핸들러를 해석해 <see cref="Dsl.Disruptor{T}"/>를 구성하는 빌더.
 /// </summary>
 /// <remarks>
+/// <para>
 /// 핸들러를 DI 로 해석하므로 핸들러가 로거·DB 컨텍스트·설정을 생성자 주입으로 받을 수 있습니다.
 /// 이것이 없으면 핸들러를 직접 <c>new</c> 해야 해서 ASP.NET Core 사용자에게 이질적입니다.
+/// </para>
+/// <para><b>해석 규칙</b></para>
+/// <list type="bullet">
+///   <item>
+///     단계 핸들러: 컨테이너에 등록되어 있으면 그것을 쓰고, 없으면 생성자 인자만 DI 에서 채워
+///     새로 만듭니다(<see cref="ActivatorUtilities.GetServiceOrCreateInstance{T}(IServiceProvider)"/>).
+///     핸들러를 따로 <c>AddSingleton</c> 하지 않아도 되도록 하기 위한 것입니다.
+///   </item>
+///   <item>
+///     워커 풀: <b>항상 워커마다 새 인스턴스</b>를 만듭니다
+///     (<see cref="ActivatorUtilities.CreateInstance{T}(IServiceProvider, object[])"/>).
+///     워커가 인스턴스를 공유하면 DB 연결·버퍼 같은 워커 로컬 상태가 스레드 간에 뒤섞입니다.
+///   </item>
+/// </list>
 /// </remarks>
 public sealed class DisruptorBuilder<T> where T : class
 {
@@ -73,10 +89,10 @@ public sealed class DisruptorBuilder<T> where T : class
     }
 
     /// <summary>예외 핸들러를 DI 에서 해석합니다.</summary>
-    public DisruptorBuilder<T> WithExceptionHandler<THandler>()
+    public DisruptorBuilder<T> WithExceptionHandler<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] THandler>()
         where THandler : class, IExceptionHandler<T>
     {
-        _exceptionHandlerFactory = static sp => sp.GetRequiredService<THandler>();
+        _exceptionHandlerFactory = static sp => ActivatorUtilities.GetServiceOrCreateInstance<THandler>(sp);
         return this;
     }
 
@@ -89,54 +105,55 @@ public sealed class DisruptorBuilder<T> where T : class
     }
 
     /// <summary>첫 단계 핸들러를 DI 에서 해석해 등록합니다.</summary>
-    public DisruptorBuilder<T> HandleEventsWith<THandler>() where THandler : class, IEventHandler<T>
-        => AddHandlerStage(static sp => sp.GetRequiredService<THandler>());
+    public DisruptorBuilder<T> HandleEventsWith<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] THandler>() where THandler : class, IEventHandler<T>
+        => AddHandlerStage(static sp => ActivatorUtilities.GetServiceOrCreateInstance<THandler>(sp));
 
     /// <summary>첫 단계에 병렬 핸들러 두 개를 등록합니다.</summary>
-    public DisruptorBuilder<T> HandleEventsWith<T1, T2>()
+    public DisruptorBuilder<T> HandleEventsWith<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T1, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T2>()
         where T1 : class, IEventHandler<T>
         where T2 : class, IEventHandler<T>
         => AddHandlerStage(
-            static sp => sp.GetRequiredService<T1>(),
-            static sp => sp.GetRequiredService<T2>());
+            static sp => ActivatorUtilities.GetServiceOrCreateInstance<T1>(sp),
+            static sp => ActivatorUtilities.GetServiceOrCreateInstance<T2>(sp));
 
     /// <summary>첫 단계에 병렬 핸들러 세 개를 등록합니다.</summary>
-    public DisruptorBuilder<T> HandleEventsWith<T1, T2, T3>()
+    public DisruptorBuilder<T> HandleEventsWith<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T1, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T2, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T3>()
         where T1 : class, IEventHandler<T>
         where T2 : class, IEventHandler<T>
         where T3 : class, IEventHandler<T>
         => AddHandlerStage(
-            static sp => sp.GetRequiredService<T1>(),
-            static sp => sp.GetRequiredService<T2>(),
-            static sp => sp.GetRequiredService<T3>());
+            static sp => ActivatorUtilities.GetServiceOrCreateInstance<T1>(sp),
+            static sp => ActivatorUtilities.GetServiceOrCreateInstance<T2>(sp),
+            static sp => ActivatorUtilities.GetServiceOrCreateInstance<T3>(sp));
 
     /// <summary>배치 핸들러를 등록합니다.</summary>
-    public DisruptorBuilder<T> HandleEventsWithBatch<THandler>() where THandler : class, IBatchEventHandler<T>
+    public DisruptorBuilder<T> HandleEventsWithBatch<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] THandler>() where THandler : class, IBatchEventHandler<T>
     {
-        _stages.Add(new BatchHandlerStage([static sp => sp.GetRequiredService<THandler>()]));
+        _stages.Add(new BatchHandlerStage([static sp => ActivatorUtilities.GetServiceOrCreateInstance<THandler>(sp)]));
         return this;
     }
 
     /// <summary>이전 단계가 끝난 뒤 실행될 핸들러를 등록합니다.</summary>
-    public DisruptorBuilder<T> Then<THandler>() where THandler : class, IEventHandler<T>
-        => AddHandlerStage(static sp => sp.GetRequiredService<THandler>());
+    public DisruptorBuilder<T> Then<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] THandler>() where THandler : class, IEventHandler<T>
+        => AddHandlerStage(static sp => ActivatorUtilities.GetServiceOrCreateInstance<THandler>(sp));
 
     /// <summary>이전 단계가 끝난 뒤 실행될 병렬 핸들러 두 개를 등록합니다.</summary>
-    public DisruptorBuilder<T> Then<T1, T2>()
+    public DisruptorBuilder<T> Then<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T1, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T2>()
         where T1 : class, IEventHandler<T>
         where T2 : class, IEventHandler<T>
         => AddHandlerStage(
-            static sp => sp.GetRequiredService<T1>(),
-            static sp => sp.GetRequiredService<T2>());
+            static sp => ActivatorUtilities.GetServiceOrCreateInstance<T1>(sp),
+            static sp => ActivatorUtilities.GetServiceOrCreateInstance<T2>(sp));
 
     /// <summary>이전 단계가 끝난 뒤 이벤트를 분배할 워커 풀을 등록합니다.</summary>
-    public DisruptorBuilder<T> ThenWorkerPool<TWorker>(int workers)
+    public DisruptorBuilder<T> ThenWorkerPool<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TWorker>(int workers)
         where TWorker : class, IWorkHandler<T>
     {
         if (workers < 1)
             throw new ArgumentOutOfRangeException(nameof(workers));
 
-        _stages.Add(new WorkerPoolStage(workers, static (sp, _) => sp.GetRequiredService<TWorker>()));
+        // 워커마다 별도 인스턴스 — 공유하면 워커 로컬 상태가 스레드 간에 섞인다.
+        _stages.Add(new WorkerPoolStage(workers, static (sp, _) => ActivatorUtilities.CreateInstance<TWorker>(sp)));
         return this;
     }
 

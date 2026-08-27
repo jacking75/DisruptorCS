@@ -1,0 +1,7 @@
+{
+  "AssembliesPath": "bin/Release/net8.0",
+  "OutputPath": "bin/Release/net8.0/rewritten",
+  "Assemblies": [
+    "Disruptor.Concurrency.Tests.dll"
+  ]
+}

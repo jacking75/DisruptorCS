@@ -98,7 +98,7 @@ Worried about forgetting the `try/finally`? Use the scope pattern — the bundle
 ```csharp
 using (var scope = ring.PublishEventScope())
 {
-    scope.Event().OrderId = 1;
+    scope.Event.OrderId = 1;
 }   // publishes on Dispose
 ```
 
@@ -116,10 +116,19 @@ while (running)                                   // your existing loop — thre
 ```
 
 Full runnable examples: [`Example/Program.cs`](Example/Program.cs) (13 scenarios) and
-[`samples/`](samples/).
+[`samples/`](samples/README.md) — five programs, each answering one question:
+
+| Sample | The question it answers |
+|---|---|
+| [GameLoopPoller](samples/GameLoopPoller/) | *Can I use this without changing my thread model?* |
+| [ChatBroadcast](samples/ChatBroadcast/) | *How does batching cut broadcast syscalls to 1/N?* |
+| [MatchSimulation](samples/MatchSimulation/) | *If the server dies, can I really restore its state?* |
+| [ReplayInspector](samples/ReplayInspector/) | *What can I actually do with the journal?* |
+| [AspNetCoreTelemetry](samples/AspNetCoreTelemetry/) | *Can I see what it's doing in production?* |
 
 ```bash
 dotnet run --project Example -c Release
+dotnet run --project samples/ChatBroadcast -c Release
 ```
 
 ---
@@ -134,14 +143,14 @@ game server rebuilds every time are already in the box?"*
 
 | | disruptor-net | DisruptorCS |
 |---|---|---|
-| Maturity / production history | ✅ Years of use | New (123 tests, soak-verified) |
+| Maturity / production history | ✅ Years of use | New (133 tests, soak- and Coyote-verified) |
 | Raw unicast throughput | Faster under backpressure | **Faster** when the ring isn't saturated — [both results published](#benchmarks) |
 | Room / session sharding | — | ✅ `ShardedDisruptor` (5,000 rooms → 8 threads) |
 | Fixed-tick integration | — | ✅ `FixedTickDriver` + `OnTimeout` |
 | Deterministic journal / replay | — | ✅ With integrity verification |
 | Backpressure policies (drop / reject) | — | ✅ `PublishGate`, 3 policies |
 | Stall diagnostics (names the slow handler) | — | ✅ Built in, OpenTelemetry-compatible |
-| Compile-time misuse detection | — | ✅ Roslyn analyzers (DISR001–004) |
+| Compile-time misuse detection | — | ✅ Roslyn analyzers (DISR001–005) |
 | DI / Generic Host / health checks | — | ✅ `DisruptorCS.Extensions.Hosting` |
 | Thread-free polling consumer | ✅ `EventPoller` | ✅ `EventPoller` |
 | Korean documentation | — | ✅ Complete |
@@ -463,6 +472,9 @@ Full results and how to reproduce: [`docs/benchmarks/`](docs/benchmarks/).
 | Blocking strategy + slow upstream handler | **0.07 cores** (no hot-spin) |
 | Soak (2,480 rounds, 49.6M events under constant backpressure) | 0 loss, heap flat at 3.2 MB, thread count flat |
 | Producer wait under backpressure | `>15 ms` stalls: **0** (was 284 per 300K publishes) |
+| Broadcast batching (200K messages × 200 sessions) | 40,000,000 → **10,400 flushes** (≈3,800× fewer syscalls) |
+| Sharded journal → replay (10,000 rooms, 2M commands) | Live and replayed state checksums identical, 0 room mismatches |
+| Coyote systematic exploration (8 models × 1,000 schedules) | 0 bugs; the negative control found its deadlock in 39 |
 
 **Head-to-head with disruptor-net — including where we lose:**
 
@@ -497,6 +509,7 @@ so they're caught at build time instead:
 | **DISR002** | `Next()` without a matching `Publish()` in a `finally` — an exception jams the ring forever | Warning |
 | **DISR003** | A capturing lambda passed to `PublishEvent` — allocates a closure per publish | Info |
 | **DISR004** | Ring size isn't a power of two | Error |
+| **DISR005** | A batch handler stores a span element — the slot is reused the moment `OnBatch` returns, so the reference silently starts pointing at a different event | Warning |
 
 Details: [`docs/analyzers/`](docs/analyzers/).
 
@@ -512,14 +525,15 @@ DisruptorCS.slnx
 │   ├── WaitStrategy/                8 wait strategies
 │   ├── Work/                        WorkerPool, WorkProcessor, IWorkHandler
 │   └── Game/                        ShardedDisruptor, FixedTickDriver, Journal, HighResolutionTimerScope
-├── Disruptor.Analyzers/             Roslyn analyzers (DISR001–004), shipped in the package
+├── Disruptor.Analyzers/             Roslyn analyzers (DISR001–005), shipped in the package
 ├── Disruptor.Extensions.Hosting/    DI / Generic Host / health checks
-├── Disruptor.Tests/                 xUnit — 109 tests
-├── Disruptor.Analyzers.Tests/       Analyzer tests — 14 tests
+├── Disruptor.Tests/                 xUnit — 113 tests
+├── Disruptor.Analyzers.Tests/       Analyzer tests — 20 tests
+├── Disruptor.Concurrency.Tests/     Coyote systematic concurrency models — 8 models
 ├── Disruptor.Benchmarks/            BenchmarkDotNet + latency distribution runner
 ├── Disruptor.Soak/                  Long-running invariant harness
-├── Example/                         10 feature scenarios
-└── samples/                         End-to-end samples
+├── Example/                         13 feature scenarios
+└── samples/                         5 end-to-end samples
 ```
 
 ```bash
@@ -530,6 +544,19 @@ dotnet run   --project Example -c Release
 dotnet run   --project Disruptor.Soak -c Release -- --minutes 30
 dotnet run   --project Disruptor.Benchmarks -c Release -- latency
 ```
+
+Systematic concurrency exploration needs one extra step, because Coyote controls scheduling by
+rewriting IL:
+
+```bash
+dotnet tool restore
+dotnet build  Disruptor.Concurrency.Tests -c Release
+dotnet coyote rewrite Disruptor.Concurrency.Tests/rewrite.coyote.json
+dotnet Disruptor.Concurrency.Tests/bin/Release/net8.0/rewritten/Disruptor.Concurrency.Tests.dll -i 1000
+```
+
+See [`docs/concurrency-testing.md`](docs/concurrency-testing.md) — including the two limits that
+matter when quoting the results.
 
 Release procedure: [`docs/RELEASE.md`](docs/RELEASE.md).
 

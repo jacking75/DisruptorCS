@@ -103,7 +103,7 @@ void BasicExample()
     // 방법 4: using 스코프 — try/finally 를 잊어 링 버퍼를 막는 사고를 구조적으로 방지
     using (var scope = ringBuffer.PublishEventScope())
     {
-        var evt = scope.Event();
+        var evt = scope.Event;
         evt.OrderId = 1001;
         evt.Symbol = "NVDA";
         evt.Price = 900.0;

@@ -30,12 +30,16 @@ public sealed class ValueRingBuffer<T> : IRingBufferCore where T : struct
     private readonly ISequencer _sequencer;
     private readonly SequencerDispatcher _dispatcher;
 
-    private ValueRingBuffer(ISequencer sequencer, Func<T>? eventFactory)
+    private ValueRingBuffer(ISequencer sequencer, Func<T>? eventFactory, bool usePinnedHeap)
     {
         _sequencer = sequencer;
         _dispatcher = new SequencerDispatcher(sequencer);
         _indexMask = sequencer.BufferSize - 1;
-        _entries = new T[sequencer.BufferSize];
+
+        // 값 타입 배열은 구조체 크기 때문에 참조 배열보다 일찍 LOH 에 들어간다.
+        _entries = usePinnedHeap
+            ? GC.AllocateArray<T>(sequencer.BufferSize, pinned: true)
+            : new T[sequencer.BufferSize];
 
         if (eventFactory is not null)
         {
@@ -58,7 +62,7 @@ public sealed class ValueRingBuffer<T> : IRingBufferCore where T : struct
             _ => throw new ArgumentOutOfRangeException(nameof(producerType))
         };
 
-        return new ValueRingBuffer<T>(sequencer, eventFactory);
+        return new ValueRingBuffer<T>(sequencer, eventFactory, options?.UsePinnedObjectHeap ?? false);
     }
 
     public static ValueRingBuffer<T> CreateSingleProducer(

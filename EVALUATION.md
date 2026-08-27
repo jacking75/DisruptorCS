@@ -13,7 +13,7 @@
 >
 > **그 다음 라운드**: 이 문서 이후의 고성능·안정성 정밀 조사와 채택 전략은
 > **[`IMPROVEMENTS.md`](IMPROVEMENTS.md)** 에 있고, 그 항목들도 전부 구현되었습니다
-> (처리량 66.4M → **250M ops/s**, 테스트 60 → **123개**, Analyzer·Hosting·Soak 신설).
+> (처리량 66.4M → **250M ops/s**, 테스트 60 → **133개**, 샘플 5종, Analyzer·Hosting·Soak·Concurrency 신설).
 
 ---
 

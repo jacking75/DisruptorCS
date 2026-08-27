@@ -95,6 +95,7 @@ public sealed class JournalWriter : IDisposable
     private readonly int _maxRecordLength;
 
     private long _recordCount;
+    private int _disposed;
 
     public JournalWriter(Stream stream, bool ownsStream = false, int maxRecordLength = DefaultMaxRecordLength)
     {
@@ -175,6 +176,11 @@ public sealed class JournalWriter : IDisposable
 
     public void Dispose()
     {
+        // 핸들러의 OnShutdown 과 소유자의 Dispose 가 겹치는 것이 정상적인 사용 형태이므로,
+        // 두 번째 호출이 이미 닫힌 스트림에 Flush 하지 않도록 막는다.
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
         Flush();
         if (_ownsStream)
             _stream.Dispose();

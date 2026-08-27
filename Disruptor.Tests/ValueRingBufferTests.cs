@@ -1,4 +1,5 @@
 using Disruptor.Dsl;
+using Disruptor.Work;
 using Disruptor.WaitStrategy;
 using Xunit;
 
@@ -169,5 +170,160 @@ public class PublishGateTests
         // 예외가 났어도 시퀀스는 게시되어야 링 버퍼가 막히지 않는다.
         Assert.True(ring.IsPublished(0));
         Assert.Equal(0, ring.Cursor);
+    }
+}
+
+/// <summary>
+/// §4.9 값 타입 워커 풀 — 참조 타입과의 기능 격차를 메운 부분.
+/// </summary>
+public class ValueWorkerPoolTests
+{
+    private sealed class CountingValueWorker : IValueWorkHandler<TestValueEvent>
+    {
+        private readonly System.Collections.Concurrent.ConcurrentBag<long> _seen;
+
+        public CountingValueWorker(System.Collections.Concurrent.ConcurrentBag<long> seen) => _seen = seen;
+
+        public int Handled { get; private set; }
+
+        public void OnEvent(ref TestValueEvent evt)
+        {
+            _seen.Add(evt.Sequence);
+            Handled++;
+        }
+    }
+
+    [Fact]
+    public void ValueWorkerPool_ProcessesEachEventExactlyOnce()
+    {
+        const int count = 20_000;
+        const int workers = 4;
+
+        var seen = new System.Collections.Concurrent.ConcurrentBag<long>();
+        var handlers = new CountingValueWorker[workers];
+
+        using var disruptor = new ValueDisruptor<TestValueEvent>(
+            1024, ProducerType.Single, new YieldingWaitStrategy(),
+            new DisruptorOptions { Name = "value-worker", AutoClearSlots = false });
+
+        disruptor.HandleEventsWithWorkerPool(workers, i =>
+        {
+            handlers[i] = new CountingValueWorker(seen);
+            return handlers[i];
+        });
+
+        var ring = disruptor.Start();
+
+        for (int i = 0; i < count; i++)
+        {
+            long seq = ring.Next();
+            ring[seq].Sequence = seq;
+            ring.Publish(seq);
+        }
+
+        disruptor.Shutdown(TimeSpan.FromSeconds(20));
+
+        Assert.Equal(count, seen.Count);           // 중복 없음
+        Assert.Equal(count, seen.Distinct().Count()); // 유실 없음
+        Assert.True(handlers.Count(h => h.Handled > 0) >= 2, "이벤트가 한 워커에만 몰렸습니다.");
+    }
+
+    [Fact]
+    public void ValueWorkerPool_AfterHandlerChain_SeesEventsOnlyAfterUpstream()
+    {
+        const int count = 5_000;
+
+        var seen = new System.Collections.Concurrent.ConcurrentBag<long>();
+        var upstream = new CountingValueHandler();
+
+        using var disruptor = new ValueDisruptor<TestValueEvent>(
+            1024, ProducerType.Single, new YieldingWaitStrategy(),
+            new DisruptorOptions { Name = "value-worker-chain", AutoClearSlots = false });
+
+        disruptor.HandleEventsWith(upstream)
+                 .ThenWorkerPool(3, i => new CountingValueWorker(seen));
+
+        var ring = disruptor.Start();
+
+        for (int i = 0; i < count; i++)
+        {
+            long seq = ring.Next();
+            ring[seq].Sequence = seq;
+            ring.Publish(seq);
+        }
+
+        disruptor.Shutdown(TimeSpan.FromSeconds(20));
+
+        Assert.Equal(count, upstream.Count);
+        Assert.Equal(count, seen.Distinct().Count());
+    }
+
+    private sealed class CountingValueHandler : IValueEventHandler<TestValueEvent>
+    {
+        private long _count;
+        public long Count => Volatile.Read(ref _count);
+        public void OnEvent(ref TestValueEvent data, long sequence, bool endOfBatch)
+            => Interlocked.Increment(ref _count);
+    }
+}
+
+/// <summary>
+/// §2.8 고정 객체 힙(POH) 옵션.
+/// </summary>
+public class PinnedObjectHeapTests
+{
+    [Fact]
+    public void PinnedRingBuffer_BehavesIdentically()
+    {
+        const int count = 10_000;
+
+        var options = new SequencerOptions { PipelineName = "poh", UsePinnedObjectHeap = true };
+
+        var ring = RingBuffer<TestEvent>.Create(
+            ProducerType.Single, () => new TestEvent(), 1024, new YieldingWaitStrategy(), options);
+
+        var barrier = ring.NewBarrier();
+        var handler = new VerifyingHandler();
+        using var processor = new BatchEventProcessor<TestEvent>(ring, barrier, handler);
+        ring.AddGatingSequences(processor.Sequence);
+
+        using var cts = new CancellationTokenSource();
+        var thread = new Thread(() => processor.Run(cts.Token)) { IsBackground = true };
+        thread.Start();
+
+        for (int i = 0; i < count; i++)
+        {
+            long seq = ring.Next();
+            ring[seq].Sequence = seq;
+            ring.Publish(seq);
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (handler.Count < count && sw.Elapsed < TimeSpan.FromSeconds(20))
+            Thread.Sleep(5);
+
+        cts.Cancel();
+        processor.Halt();
+        thread.Join(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(count, handler.Count);
+        Assert.Equal(0, handler.Mismatches);
+        Assert.Equal(0, handler.OutOfOrder);
+    }
+
+    [Fact]
+    public void PinnedValueRingBuffer_BehavesIdentically()
+    {
+        var options = new SequencerOptions { PipelineName = "poh-value", UsePinnedObjectHeap = true };
+
+        var ring = ValueRingBuffer<TestValueEvent>.Create(
+            ProducerType.Single, 256, new YieldingWaitStrategy(), options: options);
+
+        long seq = ring.Next();
+        ring[seq].Value = 42;
+        ring.Publish(seq);
+
+        Assert.Equal(42, ring[seq].Value);
+        Assert.Equal(256, ring.BufferSize);
     }
 }

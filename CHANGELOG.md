@@ -31,11 +31,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 **Operations**
 - Roslyn analyzers shipped in the package: **DISR001** (async handler), **DISR002** (`Publish`
   outside `finally`), **DISR003** (capturing lambda in `PublishEvent`), **DISR004** (ring size not a
-  power of two). See [`docs/analyzers/`](docs/analyzers/).
+  power of two), **DISR005** (a batch handler storing a span element — the slot is reused the moment
+  `OnBatch` returns, so the stored reference silently starts pointing at a different event).
+  See [`docs/analyzers/`](docs/analyzers/).
 - `DisruptorCS.Extensions.Hosting` package — `services.AddDisruptor<T>(...)` with DI-resolved
   handlers, Generic Host lifecycle binding, and `AddDisruptorCheck<T>()` health checks.
 - `Disruptor.Soak` — long-running invariant harness with four scenarios, resource-leak detection,
   and a fixed seed for reproducibility.
+- `Disruptor.Concurrency.Tests` — Microsoft Coyote systematic concurrency exploration over reduced
+  models of the blocking-signal path, the worker claim loop, and the processor lifecycle. Includes a
+  **negative control** that must fail, so a green run means something. See
+  [`docs/concurrency-testing.md`](docs/concurrency-testing.md).
+- `IValueWorkHandler<T>` / `ValueWorkProcessor<T>` / `ValueWorkerPool<T>` — order-independent work
+  distribution for value-type events, with `ref` access to the slot (no copy).
+  `ValueDisruptor.HandleEventsWithWorkerPool()` and `ThenWorkerPool()` wire it into the DSL.
+- `SequencerOptions.UsePinnedObjectHeap` / `DisruptorOptions.UsePinnedObjectHeap` — allocate the
+  slot array on the pinned object heap via `GC.AllocateArray<T>(n, pinned: true)`, avoiding LOH
+  fragmentation for large rings.
+- Four more samples under [`samples/`](samples/README.md): `ChatBroadcast` (measures the syscall
+  reduction from batch flushing), `MatchSimulation` (sharded rooms + journal + replay, verified by
+  comparing state checksums), `ReplayInspector` (a journal CLI: verify / dump / replay `--until-seq`
+  / diff), and `AspNetCoreTelemetry` (DI, health checks, and live metrics).
 - `SequencerOptions.StallReportInterval` — rate-limits stall reports so a sustained jam does not
   produce a log flood that makes the jam worse.
 - `DisruptorOptions.MaxBatchSize` — caps batch size, which turns a batch bound into a **latency
@@ -63,6 +79,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The assembly is now named `DisruptorCS` (the namespace remains `Disruptor`), so it can sit
   alongside the official `disruptor-net` package in the same project.
 - Versioning moved to MinVer (git-tag driven).
+- `PublishEventScope().Event` is now a property; `GetEvent()` is kept but `[Obsolete]`.
+- `AddDisruptor<T>()` resolves stage handlers with `ActivatorUtilities.GetServiceOrCreateInstance`
+  instead of `GetRequiredService`, so a handler no longer has to be registered separately — which is
+  what the documented example already implied. Worker-pool handlers are now built with
+  `ActivatorUtilities.CreateInstance`, giving **each worker its own instance**; previously all N
+  workers shared one, so any worker-local state was silently shared across threads.
+- `RingBuffer.PublishedCursor` now documents that it is an O(n) scan and must not be called on a
+  hot path.
 
 ### Fixed
 
@@ -76,6 +100,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ShardedDisruptor.TryPublish` now fails fast and `Publish` throws `ShardHaltedException`.
 - The unpublished-sequence wait in `BatchEventProcessor` escalated with a fixed `Thread.SpinWait(1)`;
   it now uses a `SpinWait` that resets on progress (and still never calls `Thread.Sleep(1)`).
+- `JournalWriter.Dispose()` was not idempotent. `JournalHandler.OnShutdown()` disposes the writer,
+  so an owner disposing it again flushed a closed stream — turning a clean shutdown into an
+  exception. It is now guarded.
 
 ### Removed
 

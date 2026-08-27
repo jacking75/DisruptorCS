@@ -22,7 +22,7 @@ public sealed class RingBuffer<T> : IRingBufferCore where T : class
     // 게시 경로에서 인터페이스 디스패치를 제거한다 (SequencerDispatcher 주석 참조).
     private readonly SequencerDispatcher _dispatcher;
 
-    private RingBuffer(ISequencer sequencer, Func<T> eventFactory)
+    private RingBuffer(ISequencer sequencer, Func<T> eventFactory, bool usePinnedHeap)
     {
         ArgumentNullException.ThrowIfNull(eventFactory);
 
@@ -30,8 +30,11 @@ public sealed class RingBuffer<T> : IRingBufferCore where T : class
         _dispatcher = new SequencerDispatcher(sequencer);
         _indexMask = sequencer.BufferSize - 1;
 
-        // 이벤트 미리 할당
-        _entries = new T[sequencer.BufferSize];
+        // 이벤트 미리 할당.
+        // POH 를 쓰면 큰 배열이 LOH 조각화에 기여하지 않는다 (SequencerOptions.UsePinnedObjectHeap 참조).
+        _entries = usePinnedHeap
+            ? GC.AllocateArray<T>(sequencer.BufferSize, pinned: true)
+            : new T[sequencer.BufferSize];
         for (int i = 0; i < sequencer.BufferSize; i++)
         {
             _entries[i] = eventFactory()
@@ -54,7 +57,7 @@ public sealed class RingBuffer<T> : IRingBufferCore where T : class
             _ => throw new ArgumentOutOfRangeException(nameof(producerType))
         };
 
-        return new RingBuffer<T>(sequencer, eventFactory);
+        return new RingBuffer<T>(sequencer, eventFactory, options?.UsePinnedObjectHeap ?? false);
     }
 
     /// <summary>단일 프로듀서 링 버퍼를 생성합니다.</summary>
@@ -236,6 +239,11 @@ public sealed class RingBuffer<T> : IRingBufferCore where T : class
     public long Cursor => _sequencer.Cursor;
 
     /// <summary>지금까지 연속으로 게시된 최고 시퀀스.</summary>
+    /// <remarks>
+    /// <b>비싼 프로퍼티입니다.</b> 다중 프로듀서에서는 게이팅 최솟값부터 커서까지 슬롯을 하나씩
+    /// 스캔하므로 O(뒤처진 이벤트 수)입니다. 모니터링 코드에서 주기적으로 폴링하지 마세요 —
+    /// 대시보드용 지표는 <see cref="Cursor"/> 와 <see cref="Utilization"/> 로 충분합니다.
+    /// </remarks>
     public long PublishedCursor => _sequencer.GetHighestPublishedSequence(_sequencer.GetMinimumSequence() + 1, _sequencer.Cursor);
 
     /// <summary>지금 게시 가능한 슬롯 수.</summary>
@@ -295,9 +303,18 @@ public sealed class RingBuffer<T> : IRingBufferCore where T : class
         /// <summary>시퀀스 점유에 성공했는가.</summary>
         public bool IsValid => _ringBuffer is not null;
 
-        public T Event() => _ringBuffer is null
+        /// <summary>점유한 슬롯. 값 타입 스코프의 <c>Event</c> 와 이름을 맞춘 형태입니다.</summary>
+        public T Event => _ringBuffer is null
             ? throw new InvalidOperationException("시퀀스 점유에 실패한 스코프입니다. IsValid를 먼저 확인하세요.")
             : _ringBuffer[_sequence];
+
+        /// <summary>점유한 슬롯을 가져옵니다.</summary>
+        /// <remarks>
+        /// <see cref="Event"/> 프로퍼티와 동일합니다. 값 타입 스코프(<c>ValueEventScope.Event</c>)가
+        /// 프로퍼티이므로 그쪽에 이름을 맞췄고, 이 메서드는 기존 코드 호환을 위해 남겨 둡니다.
+        /// </remarks>
+        [Obsolete("Event 프로퍼티를 사용하세요. 값 타입 스코프와 형태를 맞추기 위한 변경입니다.")]
+        public T GetEvent() => Event;
 
         public long Sequence => _sequence;
 

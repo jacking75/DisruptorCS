@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <UserSecretsId>disruptor-aspnet-telemetry</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../Disruptor/Disruptor.csproj" />
+    <ProjectReference Include="../../Disruptor.Extensions.Hosting/Disruptor.Extensions.Hosting.csproj" />
+  </ItemGroup>
+
+</Project>

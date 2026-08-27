@@ -25,7 +25,7 @@ dotnet add package DisruptorCS
 |---|---|
 | `EventPoller<T>` | **전용 스레드 없이** 기존 게임 루프에서 소비. Unity `Update()` · 자체 프레임 루프에 그대로 통합 |
 | `IBatchEventHandler<T>` | 이벤트 구간을 `ReadOnlySpan<T>` 로 통째로 수신 (SIMD·일괄 직렬화 가능) |
-| Roslyn Analyzer | DISR001~004 — async 핸들러 · finally 없는 Publish · 캡처 람다 · 2의 거듭제곱 아닌 링 크기를 **컴파일 타임에** 차단 |
+| Roslyn Analyzer | DISR001~005 — async 핸들러 · finally 없는 Publish · 캡처 람다 · 2의 거듭제곱 아닌 링 크기 · **배치 span 슬롯 참조 유출**을 컴파일 타임에 차단 |
 | `DisruptorCS.Extensions.Hosting` | `services.AddDisruptor<T>()` · DI 핸들러 해석 · Generic Host 수명주기 · 헬스체크 |
 | `HighResolutionTimerScope` | 유휴 틱 정밀도 **15.40ms → 1.52ms** (실측) |
 | 저널 무결성 v2 | XxHash3 체크섬 · 길이 상한 · 시퀀스 단조 검증 · 손상 복구 모드 |
@@ -116,7 +116,7 @@ disruptor.Shutdown();        // 미처리 이벤트를 드레인한 뒤 종료
 ```csharp
 using (var scope = ring.PublishEventScope())
 {
-    scope.Event().OrderId = 1;
+    scope.Event.OrderId = 1;
 }   // Dispose 에서 자동 Publish
 ```
 
@@ -403,10 +403,28 @@ DisruptorCS.slnx
 │   ├── WaitStrategy/           7종 대기 전략
 │   ├── Work/                   WorkerPool, WorkProcessor, IWorkHandler
 │   └── Game/                   ShardedDisruptor, FixedTickDriver, Journal
-├── Disruptor.Tests/            xUnit — 60개 테스트
+├── Disruptor.Analyzers/        Roslyn 분석기 (DISR001~005), 패키지에 동봉
+├── Disruptor.Extensions.Hosting/  DI · Generic Host · 헬스체크
+├── Disruptor.Tests/            xUnit — 113개 테스트
+├── Disruptor.Analyzers.Tests/  분석기 테스트 — 20개
+├── Disruptor.Concurrency.Tests/  Coyote 체계적 동시성 모델 — 8종
 ├── Disruptor.Benchmarks/       BenchmarkDotNet + 지연 분포 측정
-└── Example/                    10개 게임 서버 시나리오
+├── Disruptor.Soak/             장시간 불변식 하니스
+├── Example/                    13개 게임 서버 시나리오
+└── samples/                    실행 가능한 샘플 5종
 ```
+
+### 샘플 5종
+
+각 샘플은 **질문 하나에 답합니다.** 주장이 아니라 실행 결과로 답합니다.
+
+| 샘플 | 답하는 질문 |
+|---|---|
+| [GameLoopPoller](samples/GameLoopPoller/) | *스레드 모델을 바꾸지 않고 쓸 수 있는가?* |
+| [ChatBroadcast](samples/ChatBroadcast/) | *브로드캐스트 syscall 을 어떻게 1/N 로 줄이는가?* |
+| [MatchSimulation](samples/MatchSimulation/) | *서버가 죽으면 정말 상태를 복원할 수 있는가?* |
+| [ReplayInspector](samples/ReplayInspector/) | *저널로 실제로 무엇을 할 수 있는가?* |
+| [AspNetCoreTelemetry](samples/AspNetCoreTelemetry/) | *운영에서 무슨 일이 벌어지는지 보이는가?* |
 
 ```bash
 dotnet build DisruptorCS.slnx -c Release
@@ -414,7 +432,21 @@ dotnet test  Disruptor.Tests  -c Release          # 메모리 순서 결함은 R
 dotnet run   --project Example -c Release
 dotnet run   --project Disruptor.Benchmarks -c Release -- latency   # 지연 분포
 dotnet run   --project Disruptor.Benchmarks -c Release -- --filter '*'  # BenchmarkDotNet
+dotnet run   --project Disruptor.Soak -c Release -- --minutes 30
+dotnet run   --project samples/ChatBroadcast -c Release
 ```
+
+Coyote 체계적 동시성 탐색은 IL 재작성이 필요하므로 한 단계가 더 붙습니다:
+
+```bash
+dotnet tool restore
+dotnet build  Disruptor.Concurrency.Tests -c Release
+dotnet coyote rewrite Disruptor.Concurrency.Tests/rewrite.coyote.json
+dotnet Disruptor.Concurrency.Tests/bin/Release/net8.0/rewritten/Disruptor.Concurrency.Tests.dll -i 1000
+```
+
+결과를 인용하기 전에 반드시 알아야 할 두 가지 한계를
+[`docs/concurrency-testing.md`](docs/concurrency-testing.md) 에 적어 두었습니다.
 
 ---
 
@@ -432,6 +464,9 @@ dotnet run   --project Disruptor.Benchmarks -c Release -- --filter '*'  # Benchm
 | Blocking 전략 + 느린 상위 핸들러 | CPU **0.07 코어** (hot-spin 없음) |
 | Soak (2분 2,480라운드 4,960만 이벤트) | 유실 0, 힙 3.2MB 평탄 |
 | 백프레셔 시 프로듀서 대기 | `>15ms` 스톨 **0건** (이전 300K당 284건) |
+| 브로드캐스트 배칭 (20만건 × 200세션) | flush 40,000,000회 → **10,400회** (syscall 약 3,800배 감소) |
+| 샤딩 저널 → 재생 (룸 1만개, 커맨드 200만건) | 라이브·재생 체크섬 완전 일치, 불일치 룸 0 |
+| Coyote 체계적 탐색 (모델 8종 × 1,000 스케줄) | 버그 0. 음성 대조군은 **39회 만에** 교착 발견 |
 
 **disruptor-net 대비 — 지는 결과 포함**
 

@@ -281,3 +281,125 @@ public class RingSizeAnalyzerTests
             """, DiagnosticIds.RingSizeNotPowerOfTwo, expectedCount: 1);
     }
 }
+
+/// <summary>
+/// DISR005: 배치 span 의 슬롯 참조 유출 검출.
+/// </summary>
+public class BatchSpanEscapeAnalyzerTests
+{
+    private const string Preamble = """
+        using System;
+        using System.Collections.Generic;
+        using Disruptor;
+
+        public sealed class Evt { public long Value; }
+
+        """;
+
+    [Fact]
+    public async Task ReportsFieldAssignment()
+    {
+        await AnalyzerVerifier.VerifyAsync(new BatchSpanEscapeAnalyzer(), Preamble + """
+            public sealed class BadHandler : IBatchEventHandler<Evt>
+            {
+                private Evt? _last;
+
+                public void OnBatch(ReadOnlySpan<Evt> events, long startSequence, bool endOfBatch)
+                {
+                    // 슬롯 참조를 보관한다 -> 호출이 끝나면 다른 이벤트를 가리키게 된다
+                    _last = events[events.Length - 1];
+                }
+            }
+            """, DiagnosticIds.BatchSpanEscape, expectedCount: 1);
+    }
+
+    [Fact]
+    public async Task ReportsCollectionAdd()
+    {
+        await AnalyzerVerifier.VerifyAsync(new BatchSpanEscapeAnalyzer(), Preamble + """
+            public sealed class BadHandler : IBatchEventHandler<Evt>
+            {
+                private readonly List<Evt> _seen = new();
+
+                public void OnBatch(ReadOnlySpan<Evt> events, long startSequence, bool endOfBatch)
+                {
+                    for (int i = 0; i < events.Length; i++)
+                        _seen.Add(events[i]);
+                }
+            }
+            """, DiagnosticIds.BatchSpanEscape, expectedCount: 1);
+    }
+
+    [Fact]
+    public async Task ReportsEscapeViaLocal()
+    {
+        await AnalyzerVerifier.VerifyAsync(new BatchSpanEscapeAnalyzer(), Preamble + """
+            public sealed class BadHandler : IBatchEventHandler<Evt>
+            {
+                private Evt? _last;
+
+                public void OnBatch(ReadOnlySpan<Evt> events, long startSequence, bool endOfBatch)
+                {
+                    // 지역 변수를 거쳐도 유출은 유출이다
+                    var e = events[0];
+                    _last = e;
+                }
+            }
+            """, DiagnosticIds.BatchSpanEscape, expectedCount: 1);
+    }
+
+    [Fact]
+    public async Task DoesNotReportValueCopy()
+    {
+        await AnalyzerVerifier.VerifyNoDiagnosticsAsync(new BatchSpanEscapeAnalyzer(), Preamble + """
+            public sealed class GoodHandler : IBatchEventHandler<Evt>
+            {
+                private long _sum;
+                private readonly List<long> _values = new();
+
+                public void OnBatch(ReadOnlySpan<Evt> events, long startSequence, bool endOfBatch)
+                {
+                    // 값만 복사한다 -> 슬롯이 재사용되어도 안전하다
+                    for (int i = 0; i < events.Length; i++)
+                    {
+                        _sum += events[i].Value;
+                        _values.Add(events[i].Value);
+                    }
+                }
+            }
+            """, DiagnosticIds.BatchSpanEscape);
+    }
+
+    [Fact]
+    public async Task DoesNotReportLocalOnlyUse()
+    {
+        await AnalyzerVerifier.VerifyNoDiagnosticsAsync(new BatchSpanEscapeAnalyzer(), Preamble + """
+            public sealed class GoodHandler : IBatchEventHandler<Evt>
+            {
+                private long _sum;
+
+                public void OnBatch(ReadOnlySpan<Evt> events, long startSequence, bool endOfBatch)
+                {
+                    var e = events[0];       // 지역에서만 쓴다
+                    _sum += e.Value;
+                }
+            }
+            """, DiagnosticIds.BatchSpanEscape);
+    }
+
+    [Fact]
+    public async Task DoesNotReportOnNonBatchHandler()
+    {
+        await AnalyzerVerifier.VerifyNoDiagnosticsAsync(new BatchSpanEscapeAnalyzer(), Preamble + """
+            public sealed class NotAHandler
+            {
+                private Evt? _last;
+
+                public void OnBatch(ReadOnlySpan<Evt> events, long startSequence, bool endOfBatch)
+                {
+                    _last = events[0];
+                }
+            }
+            """, DiagnosticIds.BatchSpanEscape);
+    }
+}

@@ -10,7 +10,8 @@
 > 보존한 것이며, 적용 결과와 **측정이 예측을 뒤집은 항목**은 **[§7 구현 완료 현황](#7-구현-완료-현황)** 에 있습니다.
 >
 > 요약: 처리량 69M → **250M ops/s** (4.0ns/op, 할당 0) · 유휴 틱 정밀도 15.40ms → **1.52ms** ·
-> 테스트 60개 → **123개** · Analyzer·Hosting·Soak 프로젝트 신설 ·
+> 테스트 60개 → **133개** (라이브러리 113 + 분석기 20) + Coyote 동시성 모델 8종 ·
+> Analyzer·Hosting·Soak·Concurrency 프로젝트 신설 · 샘플 5종 ·
 > disruptor-net 대비 **지는 결과까지 공개**
 
 > 이 문서는 `EVALUATION.md` §9(구현 완료)의 **다음 단계**다. 현재 코드는 정확성(P0)과
@@ -1865,6 +1866,12 @@ Wave 1 적용 시 §5.7(EVALUATION) 원칙대로 **벤치마크 프로젝트에 
 §2~§4의 Wave 1~4 항목을 **전부 구현**했습니다. 이 장은 "무엇을 적용했고, 측정이 무엇을 말했는가"만
 기록합니다 — 특히 **측정이 예측을 뒤집은 항목**을 강조합니다. 설계 근거는 앞 장을 보세요.
 
+> **§7.1~§7.6 은 1차 라운드(2026-08-27 오전)의 기록입니다.** 그 시점에는 §3.7(DISR005),
+> §3.8(Coyote), §4.6(샘플 5종), §4.9(`ValueDisruptor` 워커 풀), §2.8(POH 배열)이 아직 남아
+> 있었는데도 "전부 구현"으로 적었습니다 — **과장이었습니다.** 실제로 남아 있던 항목과 그것을
+> 마무리한 결과는 **[§7.7 마무리 라운드](#77-마무리-라운드-2026-08-27-오후)** 에 있습니다.
+> 위 문장이 지금은 참이지만, 참이 된 시점은 §7.7 이후입니다.
+
 ### 7.1 성능 항목
 
 | 절 | 항목 | 적용 | 측정 결과 |
@@ -1899,8 +1906,8 @@ JIT 가 직접 호출로 바꾸고 인라인합니다. `RingBuffer`, `ValueRingB
 | §3.4 | 스톨 rate-limit | `SequencerOptions.StallReportInterval` (기본 1초) + CAS 로 승자 1명만 보고 | `StallReports_AreRateLimited` (5회 시도 → 1회 보고) |
 | §3.5 | 수명주기 가드 | Dispose 후 `Halt()` 무시, `Dispose` 멱등, Dispose 후 `Run()` 은 명시적 예외 | 3건 |
 | §3.6 | Sharded + Block 가드 | 정지 샤드 마킹 + `TryPublish` fail-fast + `Publish` 는 `ShardHaltedException` + `HealthSnapshot()` | `PublishToHaltedShard_FailsFast_InsteadOfBlockingForever` |
-| §3.7 | Roslyn Analyzer | DISR001~004 + 규칙별 문서 4편, 패키지에 동봉 | `Disruptor.Analyzers.Tests` 14건 |
-| §3.8 | Soak 하니스 | 시나리오 4종 + 자원 누수 감지 + 시드 고정 | 2분 / **2,480 라운드 / 4,960만 이벤트**(MP 시나리오 단독), 위반 0, 힙 3.2MB 평탄 |
+| §3.7 | Roslyn Analyzer | DISR001~004 + 규칙별 문서 4편, 패키지에 동봉 (DISR005 는 §7.7 에서 추가) | `Disruptor.Analyzers.Tests` 14건 → **20건** |
+| §3.8 | Soak 하니스 | 시나리오 4종 + 자원 누수 감지 + 시드 고정 (Coyote 모델은 §7.7 에서 추가) | 2분 / **2,480 라운드 / 4,960만 이벤트**(MP 시나리오 단독), 위반 0, 힙 3.2MB 평탄 |
 
 **구현 중 추가로 발견해 수정한 것**: `DrainProcessors` 와 `WorkerPool.DrainAndHalt` 가
 `Thread.Sleep(1)` 을 쓰고 있었습니다 — 라이브러리의 다른 모든 대기 경로에서 금지한 바로 그 호출이고,
@@ -1921,7 +1928,7 @@ Windows 에서는 15.6ms 입니다. "곧 끝날 드레인"에도 최소 15ms 가
 | §4.3 | Async 브리지 | `AsyncWaitStrategy`(`ValueTask` + `ThreadPool` 로 continuation 격리) · `AsyncBatchEventProcessor<T>` · `AsyncBridge.ReadAllAsync`, 테스트 7건 |
 | §4.4 | Extensions.Hosting | `AddDisruptor<T>()` · DI 핸들러 해석 · `IHostedService` 수명주기 · `AddDisruptorCheck<T>()` 헬스체크 |
 | §4.5 | 정직한 비교 벤치마크 | disruptor-net 6.0.1 + `Channel<T>` 비교, **지는 결과 포함** (`docs/benchmarks/`) |
-| §4.6 | 샘플 | `samples/GameLoopPoller` — 기존 게임 루프에 스레드 0개 추가로 통합 |
+| §4.6 | 샘플 | `samples/GameLoopPoller` — 기존 게임 루프에 스레드 0개 추가로 통합 (나머지 4종은 §7.7 에서 추가) |
 | §4.7 | 릴리스·브랜딩 | MinVer(태그 기반 SemVer) · `docs/RELEASE.md` 8단계 체크리스트 · `CHANGELOG.md` · README 배지 |
 | §4.8 | 포지셔닝 | README 의 "Why this and not disruptor-net?" 비교표 + "게임 서버 배포판" 한 줄 정체성 |
 | §4.9 | 기능 격차 | `EventHandlerGroup.And()` · `ValueDisruptor` 배치 핸들러 · `DisruptorOptions.StallReportInterval` |
@@ -1951,7 +1958,7 @@ Windows 에서는 15.6ms 입니다. "곧 끝날 드레인"에도 최소 15ms 가
 | `PhasedBackoffWaitStrategy` tail | 완전 유휴 후 단발 게시에서 20,000회 중 5회가 15ms 초과. 이 전략은 *간헐적 버스트*용이며 cold-idle 패턴에는 `TimeoutBlockingWaitStrategy` 권장 — 문서에 명시 |
 | 실서비스 부하 검증 | 여전히 단일 장비 합성 부하입니다. 실제 트래픽 패턴 재측정 필요 |
 | Linux 코어 고정 | `sched_setaffinity` P/Invoke 는 Windows 에서만 실측 |
-| Coyote 체계적 탐색 | §3.8 의 Soak 하니스는 구현했으나 Coyote 모델은 미구현. §2.3 의 메모리 순서 논증 검증에 여전히 유효한 후속 과제 |
+| Coyote 체계적 탐색 | **해결됨 (§7.7).** 모델 8종 구현. 다만 Coyote 는 스케줄만 탐색하므로 §2.3 의 **메모리 순서 논증은 여전히 검증되지 않았습니다** — 대체가 아니라 병행 수단입니다 |
 | `WorkProcessor` 취소 시 in-flight | 설계상 한계 (LMAX 동일). 무손실이 필요하면 일반 핸들러 사용 |
 | NuGet 게시 | 패키징·버저닝·릴리스 절차는 준비 완료. 실제 게시는 저장소 소유자의 결정 |
 
@@ -1965,3 +1972,132 @@ dotnet test  Disruptor.Analyzers.Tests        → 14/14 통과
 dotnet run   --project Example -c Release     → 13개 시나리오 전부 정상 (유실 0)
 dotnet run   --project Disruptor.Soak         → 2,480 라운드 / 4,960만 이벤트, 위반 0
 ```
+
+> 이것은 1차 라운드 시점의 수치입니다. 최종 수치는 **[§7.7.4](#774-최종-검증-상태)** 를 보세요.
+
+---
+
+## 7.7 마무리 라운드 (2026-08-27 오후)
+
+§7 도입부의 "전부 구현" 은 그 시점에 사실이 아니었습니다. 감사 결과 남아 있던 항목과, 그것을
+마무리한 결과를 그대로 적습니다.
+
+### 7.7.1 실제로 남아 있던 것
+
+| 절 | 항목 | 1차 라운드 상태 |
+|---|---|---|
+| §4.6 | 샘플 5종 | **1종만** (`GameLoopPoller`). ChatBroadcast / MatchSimulation / ReplayInspector / AspNetCoreTelemetry 누락 |
+| §3.7 | DISR005 (배치 span 유출) | ID 만 선언, **분석기 미구현** |
+| §3.8 | Coyote 모델 | **미구현** |
+| §4.9 | `ValueDisruptor` 워커 풀 | **미구현** (`Disruptor<T>` 에만 있었음) |
+| §2.8 | POH 배열 옵션 | **미구현** |
+| §2.8 | `PublishedCursor` 비용 주석 | **미작성** |
+| §4.9 | `EventScope.Event` 명명 통일 | `GetEvent()` 와 불일치 |
+
+### 7.7.2 마무리한 내용
+
+| 항목 | 산출물 | 검증 |
+|---|---|---|
+| **DISR005** | `BatchSpanEscapeAnalyzer` — 필드·속성·배열·컬렉션(`Add`/`Insert`/`Enqueue`/`Push`/`TryAdd`)으로의 슬롯 참조 유출을 추적, **지역 변수를 경유한 경로까지** 포함. 문서 `docs/analyzers/DISR005.md` | 분석기 테스트 14 → **20건** |
+| **Coyote 모델** | `Disruptor.Concurrency.Tests` 신설 — 신호 경로 3종 · 클레임 루프 2종 · 수명주기 3종. **음성 대조군 포함** | 1,000 반복/모델, 버그 0. 대조군은 **39회 만에** lost wakeup 교착 발견 |
+| **샘플 4종 추가** | `ChatBroadcast`(배치 flush 효과 실측) · `MatchSimulation`(샤딩+저널+재생 일치 검증) · `ReplayInspector`(저널 CLI: verify/dump/replay --until-seq/diff) · `AspNetCoreTelemetry`(DI+헬스체크+계측) | 4종 모두 실행 확인 (아래 수치) |
+| **`ValueWorkerPool<T>`** | `IValueWorkHandler<T>`(`void OnEvent(ref T)`) · `ValueWorkProcessor<T>` · `ValueDisruptor` 의 `HandleEventsWithWorkerPool` / `ThenWorkerPool` 배선 | 테스트 2건 |
+| **POH 배열** | `SequencerOptions.UsePinnedObjectHeap` → `GC.AllocateArray<T>(n, pinned: true)`. LOH 단편화 회피 | 테스트 2건 |
+| **`PublishedCursor` 문서화** | O(n) 스캔 비용을 XML 주석에 명시 (핫 경로에서 호출하지 말 것) | — |
+| **`EventScope.Event`** | 속성으로 통일, `GetEvent()` 는 `[Obsolete]` 로 유지 | 호출부·README 갱신 |
+
+**마무리 중 발견해 고친 라이브러리 결함 2가지:**
+
+1. **`JournalWriter.Dispose` 가 멱등이 아니었습니다.** `JournalHandler.OnShutdown()` 이 writer 를
+   Dispose 하고, 소유자가 다시 Dispose 하면 이미 닫힌 스트림에 `Flush()` 를 시도했습니다.
+   정상 종료 경로가 예외로 끝나는 문제라 `Interlocked.Exchange` 가드를 넣었습니다.
+
+2. **`AddDisruptor<T>()` 의 핸들러 해석이 문서와 달랐습니다.** `HandleEventsWith<THandler>()` 가
+   `GetRequiredService<THandler>()` 를 쓰고 있어, 핸들러를 별도로 `AddSingleton` 하지 않으면
+   **시작 시점에 예외**가 났습니다 — `AddDisruptor` 의 XML 예제가 바로 그 형태였는데도 말입니다.
+   `ActivatorUtilities.GetServiceOrCreateInstance<T>` 로 바꿔, 등록되어 있으면 그것을 쓰고
+   없으면 생성자 인자만 DI 로 채웁니다. 워커 풀은 `CreateInstance<T>` 로 **워커마다 새 인스턴스**를
+   만들도록 고쳤습니다 — 이전에는 N 개 워커가 같은 인스턴스를 공유해 워커 로컬 상태가 섞였습니다.
+
+### 7.7.3 샘플 실행 결과 (i7-12700KF / Windows 11 / .NET 10, Release)
+
+**ChatBroadcast** — 메시지 200,000건을 세션 200개에 브로드캐스트:
+
+| 구성 | 경과 | flush(=syscall) | flush/메시지 |
+|---|---|---|---|
+| 이벤트마다 flush | 451ms | 40,000,000 | 200.00 |
+| 배치 끝에만 flush | 329ms | **10,400** | **0.052** |
+
+flush 횟수 **3,846배** 감소. 실제 서버에서는 flush 1회가 `Socket.SendAsync` 1회이므로
+이 배수가 곧 syscall 절감입니다.
+
+**MatchSimulation** — 룸 10,000개 / 샤드 8개 / 커맨드 200만건:
+
+```
+적용 커맨드 : 2,000,000 (5,069,708/s)
+저널 검증   : 8개 샤드 전부 유효, 합계 2,000,000건 (적용 건수와 일치)
+재생        : 2,000,000건 · 300ms (6,664,490/s)
+비교한 룸   : 10,000        불일치: 0
+라이브 체크섬: A168CC2D8DB1259C
+재생 체크섬  : A168CC2D8DB1259C
+```
+
+이 샘플은 결정론을 **주장하지 않고 검증합니다** — 두 체크섬이 다르면 종료 코드 1 로 실패합니다.
+
+**ReplayInspector** — 저널 50,000레코드에 대해:
+
+| 명령 | 결과 |
+|---|---|
+| `verify` (정상) | 유효 50,000건, 56 MB/s |
+| `verify` (1바이트 뒤집음) | **손상: 24,999건까지 유효**, seq 24999 오프셋 1299964 체크섬 불일치 |
+| `verify` (꼬리 12B 잘림) | **유효 49,999건** — 잘린 꼬리는 손상이 아니라 정상 종료 지점 |
+| `replay --truncate` (손상본) | 24,999건 복구, 룸 42 상태 `hp=952 score=1246` |
+| `diff` (1건만 다른 사본) | **첫 불일치: 31,337번째**, A `value=12` vs B `value=13` |
+
+**AspNetCoreTelemetry** — `POST /throttle?spin=8000` 으로 컨슈머를 느리게 만든 뒤 부하:
+
+```
+POST /load?rps=400000&seconds=3 → accepted 13,075 / rejected 2,925 (거절률 18.3%)
+GET  /health                    → HTTP 503 (Unhealthy)   ← 요청 스레드는 블록되지 않음
+GET  /metrics                   → disruptor.rejected{op=10} = 2,925
+                                   disruptor.batch_size{GameLogicHandler} avg 1,634
+스로틀 해제 3초 후               → Healthy, 링 사용률 0%
+```
+
+백프레셔가 **요청 스레드를 붙잡는 대신 503 으로 되돌린다**는 것이 이 샘플의 요지입니다.
+
+**Coyote** — 모델당 1,000 반복:
+
+```
+OK                                       SignalNeverLosesWakeup                  반복 1,000 · 버그 0
+OK                                       SignalWakesEveryWaiter                  반복 1,000 · 버그 0
+OK  (예상대로 버그 발견 — 탐색이 살아 있음)   BuggyOrderLosesWakeup_ExpectedToFail    반복    39 · 버그 1
+OK                                       TwoWorkersClaim...ExactlyOnce           반복 1,000 · 버그 0
+OK                                       ThreeWorkersClaim...ExactlyOnce         반복 1,000 · 버그 0
+OK                                       HaltIsNeverLost                         반복 1,000 · 버그 0
+OK                                       DoubleRunStillReleasesTheGate           반복 1,000 · 버그 0
+OK                                       HaltRacingDisposeDoesNotThrow           반복 1,000 · 버그 0
+```
+
+**대조군이 39회 만에 교착을 찾았다는 사실이 나머지 7줄을 믿을 근거입니다.** 같은 탐색이
+1,000 스케줄에서 아무것도 찾지 못했습니다. 다만 두 가지 한계를 함께 기록합니다:
+(1) 이것은 **손으로 옮긴 모델**이지 실제 코드가 아니며, 원본을 고치면 모델도 고쳐야 합니다.
+(2) Coyote 는 **스케줄만 탐색하고 메모리 순서는 모델링하지 않습니다** — §2.3 의 펜스 논증은
+여전히 검증되지 않은 채로 남아 있습니다. 자세한 내용은 `docs/concurrency-testing.md` 에 있습니다.
+
+### 7.7.4 최종 검증 상태
+
+```
+dotnet build DisruptorCS.slnx -c Release            → 경고 0, 오류 0
+dotnet build DisruptorCS.slnx -c Debug              → 경고 0, 오류 0
+dotnet test  Disruptor.Tests -c Release             → 113/113 통과
+dotnet test  Disruptor.Tests -c Debug               → 113/113 통과
+dotnet test  Disruptor.Analyzers.Tests -c Release   → 20/20 통과
+dotnet run   --project Example -c Release           → 13개 시나리오 정상 (297M ops/s, 3.4ns/op, 할당 0)
+dotnet run   --project Disruptor.Soak -- --seconds 90
+                                                    → 2,303 라운드 / 4,606만 이벤트, 위반 0,
+                                                      힙 2.2MB 평탄, 스레드 기준선 대비 +0
+Coyote (모델 8종 × 1,000 반복)                       → 버그 0 (음성 대조군은 39회 만에 발견)
+샘플 5종                                             → 전부 실행 확인 (§7.7.3)
+```
+

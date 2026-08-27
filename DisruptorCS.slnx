@@ -1,10 +1,15 @@
 <Solution>
   <Folder Name="/samples/">
+    <Project Path="samples/AspNetCoreTelemetry/AspNetCoreTelemetry.csproj" />
+    <Project Path="samples/ChatBroadcast/ChatBroadcast.csproj" />
     <Project Path="samples/GameLoopPoller/GameLoopPoller.csproj" />
+    <Project Path="samples/MatchSimulation/MatchSimulation.csproj" />
+    <Project Path="samples/ReplayInspector/ReplayInspector.csproj" />
   </Folder>
   <Project Path="Disruptor.Analyzers.Tests/Disruptor.Analyzers.Tests.csproj" />
   <Project Path="Disruptor.Analyzers/Disruptor.Analyzers.csproj" />
   <Project Path="Disruptor.Benchmarks/Disruptor.Benchmarks.csproj" />
+  <Project Path="Disruptor.Concurrency.Tests/Disruptor.Concurrency.Tests.csproj" />
   <Project Path="Disruptor.Extensions.Hosting/Disruptor.Extensions.Hosting.csproj" />
   <Project Path="Disruptor.Soak/Disruptor.Soak.csproj" />
   <Project Path="Disruptor.Tests/Disruptor.Tests.csproj" />

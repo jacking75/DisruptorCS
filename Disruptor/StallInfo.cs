@@ -67,4 +67,25 @@ public sealed record SequencerOptions
     /// DEBUG 빌드에서 <c>ProducerType.Single</c> 오용(여러 스레드가 게시)을 검사할지 여부.
     /// </summary>
     public bool ValidateSingleProducerThread { get; init; } = true;
+
+    /// <summary>
+    /// 슬롯 배열을 고정 객체 힙(POH)에 할당할지 여부.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 링 크기가 커지면 슬롯 배열이 대형 객체 힙(LOH)에 들어갑니다 —
+    /// 참조 배열은 64K 슬롯부터(512KB), 값 타입 배열은 구조체 크기에 따라 더 일찍입니다.
+    /// LOH 는 기본적으로 압축되지 않아 장기 실행 서버에서 조각화의 원인이 됩니다.
+    /// </para>
+    /// <para>
+    /// 링 버퍼의 수명은 프로세스와 같고 배열은 절대 이동할 필요가 없으므로, POH 가 정확히 맞습니다.
+    /// POH 객체는 GC 가 옮기지 않아 조각화 계산에서 빠지고, 압축 대상에서도 제외됩니다.
+    /// </para>
+    /// <para>
+    /// <b>대가</b>: POH 는 회수는 되지만 압축되지 않으므로, 링 버퍼를 반복 생성·파괴하는 구성
+    /// (예: 매치마다 <c>ShardedDisruptor</c> 를 새로 만드는 패턴)에서는 오히려 불리합니다.
+    /// 프로세스 수명 동안 유지되는 파이프라인에만 켜세요.
+    /// </para>
+    /// </remarks>
+    public bool UsePinnedObjectHeap { get; init; }
 }

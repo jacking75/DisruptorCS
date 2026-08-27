@@ -1,5 +1,21 @@
 # 작업 로그
 
+## 2026-08-27 15:05 KST — IMPROVEMENTS.md 미완 항목 마무리 (샘플 4종·DISR005·Coyote·ValueWorkerPool·POH)
+
+"다한 것인가?" 확인 요청에 따라 감사한 결과, 앞선 로그의 "Wave 1~4 전부 구현"은 과장이었다.
+실제로 §4.6 샘플은 5종 중 1종만, §3.7 DISR005는 ID만 선언, §3.8 Coyote 모델·§4.9 `ValueWorkerPool`·
+§2.8 POH 배열은 미구현이었다. 이번에 전부 마무리했다: `BatchSpanEscapeAnalyzer`(DISR005, 지역 변수
+경유 유출까지 추적), Coyote 모델 8종(`Disruptor.Concurrency.Tests`, **음성 대조군 포함**),
+샘플 4종(ChatBroadcast·MatchSimulation·ReplayInspector·AspNetCoreTelemetry), `ValueWorkerPool<T>`,
+`UsePinnedObjectHeap`, `EventScope.Event` 명명 통일, `PublishedCursor` 비용 문서화.
+작업 중 라이브러리 결함 2건을 발견해 고쳤다 — `JournalWriter.Dispose` 비멱등(정상 종료가 예외로 끝남),
+`AddDisruptor<T>()`가 핸들러를 별도 등록해야만 시작되던 문제(문서 예제와 불일치) 및 워커 풀이
+N개 워커에 같은 인스턴스를 공유하던 문제.
+실측: 브로드캐스트 flush 4,000만→**10,400회**(약 3,800배 감소), 샤딩 저널 재생 체크섬 완전 일치(불일치 룸 0),
+Coyote 1,000 스케줄/모델 버그 0(대조군은 39회 만에 교착 발견). 검증은 Release/Debug 빌드 경고 0,
+테스트 113+20 전부 통과, Soak 90초 2,303라운드 4,606만 이벤트 위반 0. IMPROVEMENTS.md에 §7.7을 추가해
+과장이었던 부분을 명시하고 실제 완료 내역과 수치를 기록했다.
+
 ## 2026-08-27 13:52 KST — IMPROVEMENTS.md Wave 1~4 전면 구현
 
 설계서의 성능·안정성·채택 항목을 전부 구현했다. 코어에는 소비 루프 배치 재구성(+87%),

@@ -50,6 +50,9 @@ public sealed record DisruptorOptions
     /// <summary>DEBUG 빌드에서 ProducerType.Single 오용을 검사할지 여부.</summary>
     public bool ValidateSingleProducerThread { get; init; } = true;
 
+    /// <inheritdoc cref="SequencerOptions.UsePinnedObjectHeap"/>
+    public bool UsePinnedObjectHeap { get; init; }
+
     /// <summary>
     /// 한 번에 처리할 최대 이벤트 수. 모든 프로세서에 적용됩니다. 기본값은 무제한입니다.
     /// </summary>

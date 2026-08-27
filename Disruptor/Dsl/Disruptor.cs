@@ -38,6 +38,7 @@ public sealed class Disruptor<T> : DisruptorBase where T : class
                     Options.OnStall?.Invoke(info);
                 },
                 ValidateSingleProducerThread = Options.ValidateSingleProducerThread,
+                UsePinnedObjectHeap = Options.UsePinnedObjectHeap,
             });
     }
 
