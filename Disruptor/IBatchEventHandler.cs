@@ -23,6 +23,13 @@ namespace Disruptor;
 /// 예외 정책이 <b>조각 단위</b>로 적용됩니다(<see cref="EventExceptionAction.Skip"/> = 조각 전체 스킵).
 /// 이벤트 단위 정책이 필요하면 <see cref="IEventHandler{T}"/>를 사용하세요.
 /// </para>
+/// <para>
+/// Retry repeats only the failing contiguous segment, so handlers must be idempotent within that
+/// segment. Previously completed segments are not replayed. With automatic clearing enabled,
+/// completed and skipped segments are cleared; Retry and Halt retain the failing segment.
+/// A failure in <see cref="IClearable.Clear"/> halts the processor after reporting the exception,
+/// regardless of the recovery action, to avoid repeating side effects or returning a buffer twice.
+/// </para>
 /// </remarks>
 public interface IBatchEventHandler<T> where T : class
 {
@@ -48,6 +55,9 @@ public interface IBatchEventHandler<T> where T : class
 /// <remarks>
 /// 구조체 배열의 연속 조각을 그대로 받으므로 <c>MemoryMarshal.Cast</c> + <c>Vector&lt;T&gt;</c> /
 /// <c>TensorPrimitives</c> 로 바로 처리할 수 있습니다. 값 타입 링 버퍼의 진짜 이득이 나오는 지점입니다.
+/// Recovery is scoped to a contiguous segment, as with <see cref="IBatchEventHandler{T}"/>.
+/// When automatic clearing is enabled, completed and skipped segments are reset to default;
+/// the failing segment is retained for Retry or Halt.
 /// </remarks>
 public interface IValueBatchEventHandler<T> where T : struct
 {

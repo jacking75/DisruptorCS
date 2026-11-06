@@ -18,7 +18,7 @@ public enum BackpressurePolicy
     /// <summary>슬롯이 날 때까지 대기합니다. 유실이 절대 허용되지 않는 이벤트에만 사용하세요.</summary>
     Block,
 
-    /// <summary>혼잡 임계치를 넘으면 즉시 드롭합니다. 최신값만 의미 있는 이벤트에 적합합니다.</summary>
+    /// <summary>Drops when congested or when no slot can be claimed, without waiting for consumer capacity.</summary>
     DropWhenCongested,
 
     /// <summary>타임아웃까지 시도하고 실패하면 거절합니다. 호출자가 오류 응답을 보낼 수 있습니다.</summary>
@@ -82,13 +82,18 @@ public sealed class PublishGate<T> where T : class
         switch (policy)
         {
             case BackpressurePolicy.DropWhenCongested:
-                if (_ringBuffer.IsCongested(CongestionThreshold))
+            {
+                // Another producer can fill the ring after the utilization check. Never fall
+                // through to blocking Next here: request/network threads must be able to shed load.
+                if (_ringBuffer.IsCongested(CongestionThreshold) || !_ringBuffer.TryNext(out long sequence))
                 {
                     _dropped.Increment();
                     _metrics?.RecordDropped(opCode);
                     return false;
                 }
-                goto case BackpressurePolicy.Block;
+                Fill(fill, sequence);
+                return true;
+            }
 
             case BackpressurePolicy.Block:
             {

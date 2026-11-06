@@ -37,9 +37,10 @@ which must **fail**.
 | `DoubleRunStillReleasesTheGate` | same | A rejected second `Run` still releases the gate, so `Start()` cannot hang |
 | `HaltRacingDisposeDoesNotThrow` | same | Shutdown paths don't leak `ObjectDisposedException` |
 
-### Latest run
+### Recorded historical run
 
-i7-12700KF / Windows 11 / .NET 10, 1,000 iterations per model:
+Previously recorded on i7-12700KF / Windows 11 with a .NET 10 SDK environment; the model
+assembly targets `net8.0`. Up to 1,000 iterations per model (the negative control stops on its bug):
 
 ```
 OK                                             SignalNeverLosesWakeup            반복 1,000 · 버그 0
@@ -70,7 +71,7 @@ as a deadlock the explorer can report.
 
 **2. Coyote explores schedules, not memory ordering.** It does not model store-load reordering, so
 it cannot validate the `Interlocked.MemoryBarrier()` argument in
-[IMPROVEMENTS.md §2.3](../IMPROVEMENTS.md). Those are complementary techniques: Coyote covers
+[BlockingWaitStrategy.cs](../Disruptor/WaitStrategy/BlockingWaitStrategy.cs). Those are complementary techniques: Coyote covers
 *"which thread runs next"*, the fence argument covers *"which write is visible"*. Neither replaces
 the other, and neither replaces the soak harness in `Disruptor.Soak`.
 

@@ -4,8 +4,10 @@
 deterministic journal/replay — plus the operational tooling a real server needs (backpressure
 policies, stall diagnostics, and compile-time misuse detection).
 
-**250M ops/s · 4 ns/op · 0 bytes allocated** over 10,000,000 events (single producer, Release, i7-12700KF).
-**Zero loss** under sustained backpressure (8 producers into a 1024-slot ring).
+Historical results include 250M ops/s in a single-producer 10M-event loop and zero loss in an
+8-producer/1,024-slot stress run. See the
+[benchmark conditions](https://github.com/jacking75/DisruptorCS/blob/main/docs/benchmarks/README.md);
+these are specific observations, not performance or delivery guarantees.
 
 ```bash
 dotnet add package DisruptorCS
@@ -18,62 +20,64 @@ Targets **net8.0** and **net10.0**. AOT-compatible. MIT licensed.
 ```csharp
 using Disruptor;
 using Disruptor.Dsl;
-using Disruptor.WaitStrategy;
-
-public sealed class OrderEvent
-{
-    public long OrderId;
-    public int  Quantity;
-}
-
-public sealed class LogicHandler : IEventHandler<OrderEvent>
-{
-    public void OnEvent(OrderEvent e, long sequence, bool endOfBatch) { /* ... */ }
-
-    // Flush only at the end of a batch: 1,000 events => 1 syscall instead of 1,000.
-    public void OnBatchStart(long batchSize) { }
-
-    // Called even when no events arrive — advance ticks, flush sends, send heartbeats.
-    public void OnTimeout(long lastProcessedSequence) { }
-}
 
 using var disruptor = new Disruptor<OrderEvent>(
     eventFactory: () => new OrderEvent(),
     ringBufferSize: 1024,
-    producerType: ProducerType.Multi,
-    waitStrategy: new TimeoutBlockingWaitStrategy(TimeSpan.FromMilliseconds(1)),
-    options: new DisruptorOptions
-    {
-        Name = "packet-pipeline",
-        EnableMetrics = true,
-        OnStall = info => logger.Warn(info.ToString()),   // names the bottleneck handler
-    });
+    producerType: ProducerType.Single);
 
-disruptor.HandleEventsWith(journal, antiCheat)   // run in parallel
-         .Then(logic);                            // runs only after both finish
-
+var handler = new LogicHandler();
+disruptor.HandleEventsWith(handler);
 var ring = disruptor.Start();
 
-using (var scope = ring.PublishEventScope())      // publishes on Dispose
+using (var scope = ring.PublishEventScope())
 {
     scope.Event.OrderId = 1;
     scope.Event.Quantity = 100;
+} // Publishes on Dispose, including when filling throws.
+
+disruptor.Shutdown(); // Stop producers first; this example has finished publishing.
+if (handler.Count != 1 || handler.TotalQuantity != 100)
+    throw new InvalidOperationException("The order was not fully processed.");
+Console.WriteLine($"Orders={handler.Count}, quantity={handler.TotalQuantity}");
+
+public sealed class OrderEvent
+{
+    public long OrderId;
+    public int Quantity;
 }
 
-disruptor.Shutdown();        // drains pending events, then stops
+public sealed class LogicHandler : IEventHandler<OrderEvent>
+{
+    public int Count;
+    public int TotalQuantity;
+
+    public void OnEvent(OrderEvent e, long sequence, bool endOfBatch)
+    {
+        Count++;
+        TotalQuantity += e.Quantity;
+        // Use endOfBatch for flushing. OnBatchStart runs BEFORE the batch.
+    }
+}
 ```
+
+Paste the complete example into `Program.cs` of a console project after installing the package.
+Expected output: `Orders=1, quantity=100`. Input validation should happen before claiming a slot:
+a scope still publishes if filling throws; it does not roll back a partial event.
 
 Already have a game loop and don't want another thread? Poll from it:
 
 ```csharp
-using var poller = ring.NewPoller();
+var polledRing = RingBuffer<OrderEvent>.CreateSingleProducer(
+    () => new OrderEvent(), 1024, new Disruptor.WaitStrategy.BlockingWaitStrategy());
+using var poller = polledRing.NewPoller(); // Register BEFORE publishing; starts at the current cursor.
 
-while (running)                                   // your existing loop — thread model unchanged
+// In the existing frame loop, consume at most 512 events, then run simulation/rendering.
+poller.Poll(static (order, seq, endOfBatch) =>
 {
-    poller.Poll(static (cmd, seq, eob) => { world.Apply(cmd); return true; }, maxEvents: 512);
-    world.Simulate(dt);
-    world.Render();
-}
+    Console.WriteLine(order.OrderId);
+    return true;
+}, maxEvents: 512);
 ```
 
 ## What's in the box
@@ -86,6 +90,17 @@ while (running)                                   // your existing loop — thre
 | Backpressure | `PublishGate<T>` with `Block` / `DropWhenCongested` / `FailAfterTimeout` |
 | Observability | `DisruptorMetrics` (`System.Diagnostics.Metrics`, OpenTelemetry-compatible) and stall reports that name the bottleneck handler |
 | Game layer | `ShardedDisruptor<T>` (10,000 rooms on 8 threads), `FixedTickDriver`, `JournalWriter` / `JournalReader` with checksummed records, `HighResolutionTimerScope` (idle tick 15.40 ms → 1.52 ms on Windows) |
+
+## Processing guarantees and limits
+
+`DropWhenCongested` does not wait for consumer capacity; `FailAfterTimeout` retries synchronously.
+Batch recovery acts on the failing contiguous span. Automatic slot clearing requires one terminal
+synchronous processor and no terminal worker pool. `Shutdown` attempts a bounded drain and logs
+timeouts; it is not a guarantee that all work completed.
+
+Read [processing, recovery, and shutdown](https://github.com/jacking75/DisruptorCS/blob/main/docs/processing-semantics.md)
+for ownership, exception-handler sharing, async cancellation, and journal durability. That guide
+tracks the repository; consult the changelog for changes not yet released in your installed package.
 
 ## Analyzers included
 
@@ -113,7 +128,7 @@ DI registration, Generic Host lifecycle binding, and health checks.
 ## Links
 
 - [README](https://github.com/jacking75/DisruptorCS/blob/main/README.md) · [한국어 README](https://github.com/jacking75/DisruptorCS/blob/main/README.ko.md)
-- [Samples](https://github.com/jacking75/DisruptorCS/blob/main/samples/README.md) — game-loop polling, chat broadcast, match simulation with replay, journal CLI, ASP.NET Core telemetry
+- [Samples](https://github.com/jacking75/DisruptorCS/blob/main/samples/README.md) — 13 focused usage recipes plus five application samples
 - [Benchmarks](https://github.com/jacking75/DisruptorCS/blob/main/docs/benchmarks/README.md) — including the results where we lose to `disruptor-net`
 - [CHANGELOG](https://github.com/jacking75/DisruptorCS/blob/main/CHANGELOG.md)
 - [Issues](https://github.com/jacking75/DisruptorCS/issues)

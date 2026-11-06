@@ -9,17 +9,17 @@ a variable from the enclosing scope.
 
 ## Why this matters
 
-Publishing is the hottest path in this library, and "zero allocation on the normal path" is one of
-its core guarantees. A capturing lambda allocates **a closure object and a delegate on every
-publish**, which puts the GC back into a loop that was designed to avoid it entirely.
+The ring can publish without allocating event objects, but a capturing lambda can add closure and
+delegate allocations. The allocation frequency depends on capture scope, delegate reuse, and
+compiler/JIT optimizations; it is not necessarily one closure plus one delegate per event.
 
-A *non-capturing* lambda is cached by the compiler and costs nothing, which is why this rule targets
-capture specifically rather than lambdas in general.
+A noncapturing static lambda allows delegate caching and prevents accidental capture. It still has
+invocation cost; this rule targets avoidable capture rather than lambdas in general.
 
 ## Example
 
 ```csharp
-// Violation — captures `i`, so each iteration allocates
+// Violation — captures `i`; repeated delegate creation may allocate in the loop
 for (int i = 0; i < count; i++)
 {
     ring.PublishEvent((evt, seq) => evt.OrderId = i);
@@ -49,8 +49,8 @@ readonly struct FillOrder : IEventTranslator<OrderEvent, long>
 ring.PublishEvent(default(FillOrder), orderId);
 ```
 
-Because `TTranslator` is constrained to `struct`, the JIT specializes the call and inlines
-`Translate` — no delegate, no closure, no indirection.
+The struct overload avoids a delegate and closure and lets the JIT specialize the call. Inlining
+still depends on the method and runtime; measure the actual hot path.
 
 **Option 3 — claim and fill directly**, the most explicit form:
 

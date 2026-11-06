@@ -10,7 +10,8 @@ element of the span into a field, property, array, or collection.
 ## Why this matters
 
 The span handed to `OnBatch` points **directly at ring buffer slots**. When the call returns, the
-processor advances its sequence and the producer immediately reuses those slots.
+processor may advance its sequence, and the producer can reuse slots once all gating consumers
+have advanced. The callback gives you no ownership after it returns.
 
 A reference you kept therefore starts pointing at **a different event's data**. Nothing throws — the
 values just silently change under you. In a deterministic pipeline that is the worst possible
@@ -101,5 +102,6 @@ not all of them. Treat "no DISR005" as "no obvious leak", not as proof.
 ## Note for value-type handlers
 
 `IValueBatchEventHandler<T>` receives a writable `Span<T>` of **structs**. Copying a struct out of
-the span is a real copy, so it is safe. The rule still applies if your struct holds a reference field
-(a `byte[]` payload, a session handle) — copy or clone that field explicitly.
+the span is a real value copy. A struct containing mutable references still needs a sufficiently
+deep copy. The current analyzer conservatively flags direct span-element escapes for value types
+too, and does not trace nested field accesses; absence of a warning does not prove ownership.

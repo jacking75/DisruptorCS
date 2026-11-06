@@ -22,7 +22,10 @@ builder.Services.AddDisruptor<GameCommand>(d => d
 ```
 
 Handlers are constructed by the container, so they can take loggers, options, and repositories the
-same way any other service does.
+same way any other service does. Pipeline handlers are long-lived; use dependencies with compatible
+lifetimes. Each worker is constructed separately. `WithExceptionHandler` shares its resolved or
+supplied instance across processors, so use a thread-safe, stateless policy there; keep the default
+per-processor exception handlers when independent failure streaks are needed.
 
 `AddDisruptor` and `AddDisruptorCheck` live in `Microsoft.Extensions.DependencyInjection`, so a
 typical `Program.cs` needs no extra `using` — they show up on `builder.Services` directly.
@@ -30,8 +33,11 @@ typical `Program.cs` needs no extra `using` — they show up on `builder.Service
 ## Lifecycle
 
 `AddDisruptor<T>` registers an `IHostedService`, so the pipeline starts with the host and shuts down
-with it — draining events that are already in the ring before the process exits. No manual
-`Start()` / `Shutdown()` call, and no events lost on a graceful stop.
+with it by calling `Shutdown()`. Stop and join publishers before the pipeline's hosted service
+stops. Draining uses `DisruptorOptions.ShutdownTimeout` (default five seconds); a timeout logs a
+warning and proceeds with stop attempts. A graceful host stop does not guarantee all events were
+processed or every handler has exited. Verify outstanding work before disposing shared resources.
+See [shutdown semantics](https://github.com/jacking75/DisruptorCS/blob/main/docs/processing-semantics.md#shutdown-and-durable-recovery).
 
 ## Health checks
 

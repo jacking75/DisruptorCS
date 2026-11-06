@@ -225,6 +225,14 @@ public sealed class BatchEventProcessor<T> : IEventProcessor, IDisposable where 
             // 이 루프를 다시 돌아 배치의 나머지 구간을 이어서 처리한다.
             while (nextSequence <= available)
             {
+                // Check between attempts, not per event on the successful hot path.
+                // A persistent Retry must not keep a halted processor spinning forever.
+                if (ct.IsCancellationRequested)
+                {
+                    _sequence.SetValue(nextSequence - 1);
+                    return;
+                }
+
                 if (ProcessSegment(ref nextSequence, available))
                     continue;
 
@@ -235,14 +243,6 @@ public sealed class BatchEventProcessor<T> : IEventProcessor, IDisposable where 
             }
 
             _sequence.SetValue(available);
-
-            // 실패 스트릭 리셋은 이벤트마다가 아니라 "예외 없이 완료된 배치"마다 1회.
-            // 실패가 한 번도 없었다면 호출할 이유가 없으므로 건너뛴다 (DIM 디스패치 비용 회피).
-            if (_hasPendingFailure)
-            {
-                _exceptionHandler.OnEventProcessed();
-                _hasPendingFailure = false;
-            }
 
             Recorder?.OnBatchCompleted(batchSize);
 
@@ -259,16 +259,14 @@ public sealed class BatchEventProcessor<T> : IEventProcessor, IDisposable where 
     /// <returns>계속 진행하려면 true, Halt 요청이면 false.</returns>
     private bool ProcessSegment(ref long nextSequence, long available)
     {
+        if (_batchHandler is not null)
+            return ProcessBatchSegment(ref nextSequence, available);
+
         long current = nextSequence;
 
         try
         {
-            if (_batchHandler is not null)
-            {
-                DispatchBatch(_batchHandler, current, available);
-                current = available + 1;
-            }
-            else if (TypeIsClearable && ClearAfterProcess)
+            if (TypeIsClearable && ClearAfterProcess)
             {
                 // 분기를 루프 밖으로 — JIT 가 두 개의 타이트 루프를 각각 최적화한다.
                 var handler = _eventHandler!;
@@ -290,20 +288,23 @@ public sealed class BatchEventProcessor<T> : IEventProcessor, IDisposable where 
                 }
             }
 
+            ResetFailureAfterSuccess();
             nextSequence = current;
             return true;
         }
         catch (Exception ex)
         {
-            // current 가 곧 실패한 시퀀스다 (배치 핸들러면 조각의 시작 시퀀스).
+            // A successful prefix separates failures even inside the same batch.
+            if (current > nextSequence)
+                ResetFailureAfterSuccess();
+
             Recorder?.OnHandlerError();
             _hasPendingFailure = true;
 
             switch (SafeHandleException(ex, current, _ringBuffer[current]))
             {
                 case EventExceptionAction.Skip:
-                    // 배치 핸들러는 실패 이벤트를 특정할 수 없으므로 조각 전체를 건너뛴다.
-                    nextSequence = _batchHandler is not null ? available + 1 : current + 1;
+                    nextSequence = current + 1;
                     return true;
 
                 case EventExceptionAction.Retry:
@@ -318,26 +319,68 @@ public sealed class BatchEventProcessor<T> : IEventProcessor, IDisposable where 
         }
     }
 
-    /// <summary>
-    /// 배치를 랩 경계에서 최대 2개의 연속 조각으로 나눠 배치 핸들러에 전달합니다.
-    /// </summary>
-    private void DispatchBatch(IBatchEventHandler<T> handler, long from, long to)
+    private void ResetFailureAfterSuccess()
     {
+        if (!_hasPendingFailure) return;
+        _exceptionHandler.OnEventProcessed();
+        _hasPendingFailure = false;
+    }
+
+    // One invocation is one contiguous segment. Keep its recovery boundary separate
+    // from the entire available range, or a failure after wrap replays completed work.
+    private bool ProcessBatchSegment(ref long nextSequence, long available)
+    {
+        long current = nextSequence;
         int bufferSize = _ringBuffer.BufferSize;
-        long current = from;
+        int startIndex = (int)current & (bufferSize - 1);
+        long segmentEnd = Math.Min(available, current + bufferSize - startIndex - 1);
 
-        while (current <= to)
+        try
         {
-            int startIndex = (int)current & (bufferSize - 1);
-            // 이 조각이 링의 끝을 넘지 않는 최대 길이
-            long segmentEnd = Math.Min(to, current + (bufferSize - startIndex) - 1);
-
-            handler.OnBatch(_ringBuffer.GetSegment(current, segmentEnd),
-                            current,
-                            endOfBatch: segmentEnd == to);
-
-            current = segmentEnd + 1;
+            _batchHandler!.OnBatch(_ringBuffer.GetSegment(current, segmentEnd), current, segmentEnd == available);
+            ResetFailureAfterSuccess();
         }
+        catch (Exception ex)
+        {
+            Recorder?.OnHandlerError();
+            _hasPendingFailure = true;
+            switch (SafeHandleException(ex, current, _ringBuffer[current]))
+            {
+                case EventExceptionAction.Skip:
+                    break;
+                case EventExceptionAction.Retry:
+                    return true; // Leave the failing segment and its payloads intact.
+                default:
+                    _lastFault = ex;
+                    return false;
+            }
+        }
+
+        if (TypeIsClearable && ClearAfterProcess)
+        {
+            // Cleanup is not business processing. Retrying the callback after a cleanup
+            // failure could repeat side effects or return an already returned pooled buffer.
+            try
+            {
+                while (nextSequence <= segmentEnd)
+                {
+                    ((IClearable)_ringBuffer[nextSequence]).Clear();
+                    nextSequence++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Recorder?.OnHandlerError();
+                SafeHandleException(ex, nextSequence, _ringBuffer[nextSequence]);
+                _lastFault = ex;
+                return false;
+            }
+        }
+        else
+        {
+            nextSequence = segmentEnd + 1;
+        }
+        return true;
     }
 
     private void InvokeStart()

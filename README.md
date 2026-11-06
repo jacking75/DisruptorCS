@@ -11,8 +11,10 @@ and deterministic journal/replay — plus the operational tooling a real server 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%2010.0-512BD4)
 
-**250M ops/s · 4 ns/op · 0 bytes allocated** over 10,000,000 events (single producer, Release, i7-12700KF).
-**Zero loss** under sustained backpressure (8 producers into a 1024-slot ring).
+Historical measurements: **250M ops/s · 4 ns/op · 0 bytes allocated** in the retired 10M-event loop
+(single producer, Release, i7-12700KF), and zero loss in an 8-producer/1,024-slot stress run.
+See [measurement conditions and the latest reliability check](docs/benchmarks/README.md); these
+results are workload-specific, not throughput or delivery guarantees.
 
 ```bash
 dotnet add package DisruptorCS
@@ -41,93 +43,100 @@ dotnet add package DisruptorCS
 ```csharp
 using Disruptor;
 using Disruptor.Dsl;
-using Disruptor.WaitStrategy;
-
-public sealed class OrderEvent
-{
-    public long OrderId;
-    public int  Quantity;
-}
-
-public sealed class LogicHandler : IEventHandler<OrderEvent>
-{
-    public void OnEvent(OrderEvent e, long sequence, bool endOfBatch) { /* ... */ }
-
-    // Flush only at the end of a batch: 1,000 events => 1 syscall instead of 1,000.
-    public void OnBatchStart(long batchSize) { }
-
-    // Called even when no events arrive — advance ticks, flush sends, send heartbeats.
-    public void OnTimeout(long lastProcessedSequence) { }
-}
 
 using var disruptor = new Disruptor<OrderEvent>(
     eventFactory: () => new OrderEvent(),
     ringBufferSize: 1024,
-    producerType: ProducerType.Multi,
-    waitStrategy: new TimeoutBlockingWaitStrategy(TimeSpan.FromMilliseconds(1)),
-    options: new DisruptorOptions
-    {
-        Name = "packet-pipeline",
-        EnableMetrics = true,
-        OnStall = info => logger.Warn(info.ToString()),   // names the bottleneck handler
-    });
+    producerType: ProducerType.Single);
 
-disruptor.HandleEventsWith(journal, antiCheat)   // run in parallel
-         .Then(logic);                            // runs only after both finish
-
+var handler = new LogicHandler();
+disruptor.HandleEventsWith(handler);
 var ring = disruptor.Start();
 
-long seq = ring.Next();
-try
+using (var scope = ring.PublishEventScope())
 {
-    var e = ring[seq];       // pre-allocated slot — no object is created
-    e.OrderId = 1;
-    e.Quantity = 100;
-}
-finally
+    scope.Event.OrderId = 1;
+    scope.Event.Quantity = 100;
+} // Publishes on Dispose, including when filling throws.
+
+disruptor.Shutdown(); // Stop producers first; this example has finished publishing.
+if (handler.Count != 1 || handler.TotalQuantity != 100)
+    throw new InvalidOperationException("The order was not fully processed.");
+Console.WriteLine($"Orders={handler.Count}, quantity={handler.TotalQuantity}");
+
+public sealed class OrderEvent
 {
-    ring.Publish(seq);       // the finally is mandatory — skipping it jams the ring forever
+    public long OrderId;
+    public int Quantity;
 }
 
-disruptor.Shutdown();        // drains pending events, then stops
+public sealed class LogicHandler : IEventHandler<OrderEvent>
+{
+    public int Count;
+    public int TotalQuantity;
+
+    public void OnEvent(OrderEvent e, long sequence, bool endOfBatch)
+    {
+        Count++;
+        TotalQuantity += e.Quantity;
+        // Use endOfBatch for flushing. OnBatchStart runs BEFORE the batch.
+    }
+}
 ```
 
-Worried about forgetting the `try/finally`? Use the scope pattern — the bundled analyzer
-(DISR002) also flags the unguarded form:
+Paste the code above into a console project's `Program.cs` after adding the package. It prints
+`Orders=1, quantity=100`. The repository's samples require the .NET 10 SDK; the library targets
+.NET 8 and .NET 10. The default wait strategy is `TimeoutBlockingWaitStrategy(1 ms)`.
+
+For manual publication, always pair `Next()` with `Publish()` in `finally` (DISR002 checks common
+unguarded forms). A narrow scope handles that pairing for you:
 
 ```csharp
 using (var scope = ring.PublishEventScope())
 {
     scope.Event.OrderId = 1;
+    scope.Event.Quantity = 100;
 }   // publishes on Dispose
 ```
 
 Already have a game loop and don't want another thread? Poll from it:
 
 ```csharp
-using var poller = ring.NewPoller();
+var polledRing = RingBuffer<OrderEvent>.CreateSingleProducer(
+    () => new OrderEvent(), 1024, new Disruptor.WaitStrategy.BlockingWaitStrategy());
+using var poller = polledRing.NewPoller(); // Register BEFORE publishing; starts at the current cursor.
 
-while (running)                                   // your existing loop — thread model unchanged
+// In the existing frame loop, consume at most 512 events, then run simulation/rendering.
+poller.Poll(static (order, seq, endOfBatch) =>
 {
-    poller.Poll(static (cmd, seq, eob) => { world.Apply(cmd); return true; }, maxEvents: 512);
-    world.Simulate(dt);
-    world.Render();
-}
+    Console.WriteLine(order.OrderId);
+    return true;
+}, maxEvents: 512);
 ```
 
-Full runnable examples: [`Example/Program.cs`](Example/Program.cs) (13 scenarios) and
-[`samples/`](samples/README.md) — five programs, each answering one question:
+All examples start at the **[samples guide](samples/README.md)**: learn the APIs with
+**[13 focused usage recipes](samples/UsageRecipes/README.md)**
+([한국어](samples/UsageRecipes/README.ko.md)). Each has its own source file, a selectable command,
+an explanation of when to use it, and executable result checks. Topics include multiple producers,
+dependency graphs, batches, structs, workers, async sinks, buffer ownership, error handling, and journal/replay.
+
+```bash
+dotnet run --project samples/UsageRecipes -c Release -- --list
+dotnet run --project samples/UsageRecipes -c Release -- pipeline
+dotnet run --project samples/UsageRecipes -c Release -- all
+```
+
+Then explore five application samples, each answering one question:
 
 | Sample | The question it answers |
 |---|---|
 | [GameLoopPoller](samples/GameLoopPoller/) | *Can I use this without changing my thread model?* |
-| [ChatBroadcast](samples/ChatBroadcast/) | *How does batching cut broadcast syscalls to 1/N?* |
+| [ChatBroadcast](samples/ChatBroadcast/) | *How does batching reduce broadcast flush calls?* |
 | [MatchSimulation](samples/MatchSimulation/) | *If the server dies, can I really restore its state?* |
 | [ReplayInspector](samples/ReplayInspector/) | *What can I actually do with the journal?* |
 | [AspNetCoreTelemetry](samples/AspNetCoreTelemetry/) | *Can I see what it's doing in production?* |
 
 ```bash
-dotnet run --project Example -c Release
 dotnet run --project samples/ChatBroadcast -c Release
 ```
 
@@ -143,7 +152,7 @@ game server rebuilds every time are already in the box?"*
 
 | | disruptor-net | DisruptorCS |
 |---|---|---|
-| Maturity / production history | ✅ Years of use | New (133 tests, soak- and Coyote-verified) |
+| Maturity / production history | ✅ Years of use | New (core/analyzer tests, soak checks, and reduced Coyote models) |
 | Raw unicast throughput | Faster under backpressure | **Faster** when the ring isn't saturated — [both results published](#benchmarks) |
 | Room / session sharding | — | ✅ `ShardedDisruptor` (5,000 rooms → 8 threads) |
 | Fixed-tick integration | — | ✅ `FixedTickDriver` + `OnTimeout` |
@@ -153,7 +162,7 @@ game server rebuilds every time are already in the box?"*
 | Compile-time misuse detection | — | ✅ Roslyn analyzers (DISR001–005) |
 | DI / Generic Host / health checks | — | ✅ `DisruptorCS.Extensions.Hosting` |
 | Thread-free polling consumer | ✅ `EventPoller` | ✅ `EventPoller` |
-| Korean documentation | — | ✅ Complete |
+| Korean documentation | — | ✅ README, samples, processing semantics |
 
 **In one line: DisruptorCS is a game-server distribution of the Disruptor pattern.**
 It doesn't reinvent the core — it standardizes the layer above it.
@@ -167,7 +176,7 @@ It doesn't reinvent the core — it standardizes the layer above it.
 | Type | Purpose |
 |---|---|
 | `RingBuffer<T>` | Pre-allocated ring buffer for reference-type events |
-| `ValueRingBuffer<T>` | **Value-type** events stored inline (`ref T` access, excluded from GC scanning) |
+| `ValueRingBuffer<T>` | **Value-type** events stored inline (`ref T` access; structs with references still require GC scanning) |
 | `EventPoller<T>` | Thread-free consumption — integrate with an existing game loop |
 | `IBatchEventHandler<T>` | Receive a whole batch as a `ReadOnlySpan<T>` (SIMD-friendly) |
 | `SingleProducerSequencer` | CAS-free single-producer sequencer |
@@ -190,7 +199,7 @@ It doesn't reinvent the core — it standardizes the layer above it.
 | `BlockingWaitStrategy` | 19.1 µs | lowest | Oversubscribed |
 | **`TimeoutBlockingWaitStrategy`** | 22.8 µs | lowest | **Game-server default** — provides the `OnTimeout` hook |
 | `PhasedBackoffWaitStrategy` | 25.5 µs | adaptive | Intermittent bursts (not cold-idle traffic) |
-| `AsyncWaitStrategy` | ~20 µs | lowest | `await`-based consumers |
+| `AsyncWaitStrategy` | not measured here | lowest | `await`-based consumers |
 
 ### Game layer (`Disruptor.Game`)
 
@@ -232,6 +241,10 @@ For precise ticks while idle, turn on the high-resolution timer at startup:
 using var timerScope = new HighResolutionTimerScope();   // 15.40 ms → 1.52 ms (measured)
 ```
 
+The game-specific snippets below are integration sketches; types such as `GameCommand`, `world`,
+and `codec` belong to the application. Fixed wall-clock ticks alone do not make replay deterministic:
+record tick boundaries and other nondeterministic inputs. See the runnable samples for full setups.
+
 ### 2. Backpressure policy — dropping is a policy too
 
 ```csharp
@@ -246,6 +259,10 @@ if (!gate.TryPublish(BackpressurePolicy.FailAfterTimeout, (e, s) => Fill(e, purc
     return Error.ServerBusy;
 ```
 
+`DropWhenCongested` returns `false` instead of waiting for consumer capacity. `FailAfterTimeout`
+retries synchronously and occupies the caller until success or timeout; only `Block` uses the
+supplied cancellation token. See [publication semantics](docs/processing-semantics.md#publication-and-backpressure).
+
 ### 3. Room sharding — 10,000 rooms on 8 threads
 
 ```csharp
@@ -257,15 +274,19 @@ using var sharded = new ShardedDisruptor<GameCommand>(
 
 sharded.Start();
 
-// The same room always maps to the same shard → per-room ordering is guaranteed
+// The same room maps to the same shard; consumption follows the claimed sequence order.
 sharded.Publish(roomId, (evt, seq) => Fill(evt, cmd));
 ```
 
 | Approach | Threads | Ring memory (10,000 rooms) | Verdict |
 |---|---:|---:|---|
 | One Disruptor per room (ring 1024) | 10,000 | ~1.3 GB | Impossible |
-| One `Channel<T>` per room | 0 (thread pool) | tens of MB | Works, but no ordering/batching benefit |
+| One `Channel<T>` per room | No dedicated thread required | Depends on capacity and payload | Queue ordering; multicast requires additional fan-out |
 | **ShardedDisruptor (16 shards, ring 4096)** | **16** | **~8 MB** | **Recommended** |
+
+Memory figures above are illustrative estimates, not measured requirements; event size and
+handler count change them. Shards have independent sequences, not one cross-shard global order.
+Concurrent producers for the same room need an application ordering rule if arrival order matters.
 
 > The trade-off: one heavy room slows the other rooms on its shard (head-of-line blocking).
 > Cap per-room processing time and push the overflow to a `WorkerPool`.
@@ -273,7 +294,8 @@ sharded.Publish(roomId, (evt, seq) => Fill(evt, cmd));
 ### 4. Deterministic journal / replay
 
 ```csharp
-// The journal is written before the logic commits
+// Stop on a journal error; skipping it would let logic run without a matching record.
+disruptor.SetDefaultExceptionHandler(new HaltOnExceptionHandler<GameCommand>());
 disruptor.HandleEventsWith(new JournalHandler<GameCommand>(writer, codec))
          .Then(new WorldUpdateHandler(world));
 
@@ -289,8 +311,10 @@ JournalVerificationResult result = JournalReader.Verify(stream);
 // "Corrupt: valid through 1,204,331 records. seq 1204331: checksum mismatch"
 ```
 
-With this in place you get: exact bug reproduction, hot-standby replication, cheat verification
-(client claim vs. server journal), and crash recovery from the last valid sequence.
+This supplies the ordered record stream for replay and auditing. Durable crash recovery additionally
+requires an explicit flush policy (`flushToDiskOnBatchEnd` defaults to `false`), reproducible inputs
+and initial state, and coordinated shutdown on `ProcessorHalted`. Replication transport and snapshots
+are application responsibilities. See [durable recovery](docs/processing-semantics.md#shutdown-and-durable-recovery).
 
 ### 5. Observability — you have to be able to debug an incident
 
@@ -315,9 +339,11 @@ is the bottleneck and producers are about to block.
 ### 6. Exceptions don't kill the process
 
 ```csharp
-disruptor.SetDefaultExceptionHandler(new ResilientExceptionHandler<GameCommand>(
-    onError: (ex, seq, evt) => logger.Error(ex, "seq={Seq}", seq),
-    maxConsecutiveFailures: 100));   // halt only this processor past the threshold
+// After registering synchronous stages, before Start: one stateful handler per processor.
+foreach (var processor in disruptor.Processors.OfType<BatchEventProcessor<GameCommand>>())
+    processor.SetExceptionHandler(new ResilientExceptionHandler<GameCommand>(
+        onError: (ex, seq, evt) => Console.Error.WriteLine($"seq={seq}: {ex}"),
+        maxConsecutiveFailures: 100)); // Halt when the threshold is reached.
 
 disruptor.ProcessorHalted += (p, ex) => alerting.Fatal($"handler '{p.Name}' halted — drain needed");
 ```
@@ -325,8 +351,13 @@ disruptor.ProcessorHalted += (p, ex) => alerting.Fatal($"handler '{p.Name}' halt
 | Policy | Behaviour |
 |---|---|
 | `Skip` | Drop the event and continue (game-server default) |
-| `Retry` | Re-process the same event (idempotent handlers only) |
+| `Retry` | Retry the event, or the failing span for a synchronous batch handler; requires idempotency |
 | `Halt` | Stop **only this processor**. The process stays alive |
+
+`Skip` is not rollback and dependent stages may continue. `ResilientExceptionHandler` counts
+consecutive failures per instance; do not share it through `SetDefaultExceptionHandler` across
+multiple processors. The unconfigured default already creates a separate instance per processor.
+See [recovery and clearing rules](docs/processing-semantics.md#synchronous-exception-policies).
 
 ### 7. ASP.NET Core / Generic Host integration
 
@@ -346,8 +377,10 @@ builder.Services.AddDisruptor<GameCommand>(d => d
 builder.Services.AddHealthChecks().AddDisruptorCheck<GameCommand>();
 ```
 
-Start/Shutdown are bound to the host lifecycle (with draining), and a halted processor is reported
-as `Critical` and — by default — triggers a graceful application stop.
+Start/Shutdown are bound to the host lifecycle with a bounded drain attempt. Drain timeouts are
+logged; a normal host stop does not guarantee every event was processed. A halted processor is
+logged at `Critical`, reported as `Unhealthy` by the health check, and by default requests an
+application stop. See [shutdown semantics](docs/processing-semantics.md#shutdown-and-durable-recovery).
 
 ---
 
@@ -391,16 +424,20 @@ its value. Intel's streaming prefetcher pulls adjacent cache-line pairs (128 B),
 **Pre-allocation.** Every event object is created when the ring buffer is built. Publishing
 overwrites fields of an existing slot instead of allocating — measured **0 bytes across 10M events**.
 
-**Slot clearing.** A slot that holds a `byte[]` or a session handle keeps it alive for up to one full
-lap of the ring. Implement `IClearable` and the framework calls `Clear()` right after the last
-handler processes the event.
+**Slot clearing.** With `AutoClearSlots = true` (default), the DSL enables clearing only when there
+is one terminal synchronous processor and no terminal worker pool. Reference events must implement
+`IClearable`; value slots are reset to `default`. Multiple terminal readers need a final join stage
+before cleanup. Low-level processors and pollers require explicit ownership/cleanup configuration.
+See the [pooled-payload recipe](samples/UsageRecipes/README.md#10-pooled-buffer-ownership-pooled-payload).
 
-**Lock-free.** `SingleProducerSequencer` uses no CAS at all; `MultiProducerSequencer` uses only CAS.
-No locks anywhere on the hot path.
+**Sequence claiming.** Single-producer claims avoid CAS; multi-producer claims use CAS.
+This does not make the complete pipeline lock-free: blocking wait strategies use monitor locks,
+and a full ring can make producers wait for consumers.
 
-**No `Thread.Sleep(1)`.** Every wait path uses `SpinWait.SpinOnce(sleep1Threshold: -1)`. The default
-`SpinOnce()` eventually sleeps, and Windows' default timer resolution (15.6 ms) turns that into a
-full lost tick for a 60 Hz server. Measured: `>15 ms` stalls went **284 → 0** and throughput **+50%**.
+**Default producer backoff avoids `Thread.Sleep(1)`.** `SpinOnlyBackoff` spins and yields without
+the eventual one-millisecond sleep of default `SpinWait.SpinOnce()`. `SleepingBackoff` and
+`SleepingWaitStrategy` deliberately allow sleeping to save CPU; blocking strategies use monitor
+waits. Choose these trade-offs using the [recorded latency measurements](docs/benchmarks/README.md#latency-distribution).
 
 **Batch-shaped consumer loop.** `try`/`catch`, failure-streak reset, and `IClearable` checks all
 happen at batch boundaries, not per event — a `try` region per event constrains the JIT's code motion.
@@ -459,7 +496,8 @@ claiming, and consumer notification into one structure; a Disruptor separates al
 
 ## Benchmarks
 
-Measured on Intel i7-12700KF (12P/20L), Windows 11, .NET 10.0.400, Release/x64, Server GC.
+The historical environment was reported as Intel i7-12700KF (12P/20L), Windows 11, SDK 10.0.400,
+.NET runtime 10.0.11, Release/x64, Server GC. Stored BenchmarkDotNet exports do not identify the CPU.
 Full results and how to reproduce: [`docs/benchmarks/`](docs/benchmarks/).
 
 | Scenario | Result |
@@ -472,9 +510,9 @@ Full results and how to reproduce: [`docs/benchmarks/`](docs/benchmarks/).
 | Blocking strategy + slow upstream handler | **0.07 cores** (no hot-spin) |
 | Soak (2,480 rounds, 49.6M events under constant backpressure) | 0 loss, heap flat at 3.2 MB, thread count flat |
 | Producer wait under backpressure | `>15 ms` stalls: **0** (was 284 per 300K publishes) |
-| Broadcast batching (200K messages × 200 sessions) | 40,000,000 → **10,400 flushes** (≈3,800× fewer syscalls) |
+| Broadcast batching (200K messages × 200 sessions) | 40,000,000 → **10,400 flushes** (≈3,800× fewer simulated flushes) |
 | Sharded journal → replay (10,000 rooms, 2M commands) | Live and replayed state checksums identical, 0 room mismatches |
-| Coyote systematic exploration (8 models × 1,000 schedules) | 0 bugs; the negative control found its deadlock in 39 |
+| Coyote exploration (7 positive models, 1 negative control) | No bugs found in 1,000 schedules per positive model; control deadlock found at iteration 39 |
 
 **Head-to-head with disruptor-net — including where we lose:**
 
@@ -524,25 +562,24 @@ DisruptorCS.slnx
 ├── Disruptor/                       Core library (net8.0 / net10.0)
 │   ├── Async/                       AsyncWaitStrategy, AsyncBatchEventProcessor, AsyncBridge
 │   ├── Dsl/                         Disruptor<T>, ValueDisruptor<T>, DisruptorOptions
-│   ├── WaitStrategy/                8 wait strategies
+│   ├── WaitStrategy/                7 synchronous wait strategies (async lives above)
 │   ├── Work/                        WorkerPool, WorkProcessor, IWorkHandler
 │   └── Game/                        ShardedDisruptor, FixedTickDriver, Journal, HighResolutionTimerScope
 ├── Disruptor.Analyzers/             Roslyn analyzers (DISR001–005), shipped in the package
 ├── Disruptor.Extensions.Hosting/    DI / Generic Host / health checks (a second package)
-├── Disruptor.Tests/                 xUnit — 113 tests
+├── Disruptor.Tests/                 xUnit — 141 tests
 ├── Disruptor.Analyzers.Tests/       Analyzer tests — 20 tests
 ├── Disruptor.Concurrency.Tests/     Coyote systematic concurrency models — 8 models
 ├── Disruptor.Benchmarks/            BenchmarkDotNet + latency distribution runner
 ├── Disruptor.Soak/                  Long-running invariant harness
-├── Example/                         13 feature scenarios
-└── samples/                         5 end-to-end samples
+└── samples/                         13 focused recipes + 5 end-to-end samples
 ```
 
 ```bash
 dotnet build DisruptorCS.slnx -c Release
-dotnet test  Disruptor.Tests  -c Release          # memory-ordering bugs only show with optimizations on
+dotnet test  Disruptor.Tests  -c Release          # include optimized JIT paths in concurrency checks
 dotnet test  Disruptor.Tests  -c Debug            # Debug-only diagnostics (single-producer misuse, async handlers)
-dotnet run   --project Example -c Release
+dotnet run   --project samples/UsageRecipes -c Release -- all
 dotnet run   --project Disruptor.Soak -c Release -- --minutes 30
 dotnet run   --project Disruptor.Benchmarks -c Release -- latency
 ```
@@ -566,7 +603,10 @@ Release procedure: [`docs/RELEASE.md`](docs/RELEASE.md).
 
 ## Gotchas
 
-**Never `await` inside a handler.** Disruptor consumers are synchronous, blocking threads.
+Read [processing, recovery, and shutdown](docs/processing-semantics.md) for batch recovery,
+cancellation, cleanup ownership, and drain-timeout behavior.
+
+**Never `await` inside a synchronous handler.** Disruptor consumers are synchronous, blocking threads.
 `async void OnEvent` returns at the first `await`, so the framework advances the sequence and the
 slot gets reused while you're still using it. DISR001 catches this at compile time. Push slow I/O
 into a `WorkerPool`, or use `AsyncBatchEventProcessor` where a batch boundary is an acceptable
@@ -595,8 +635,8 @@ Available logical cores = C
 
 ## Documentation
 
-- [`IMPROVEMENTS.md`](IMPROVEMENTS.md) — performance/stability investigation and adoption strategy (with probe measurements)
-- [`EVALUATION.md`](EVALUATION.md) — game-server suitability assessment and the design that produced this library
+- [Processing semantics](docs/processing-semantics.md) — recovery, clearing, cancellation, shutdown
+- [Usage recipes](samples/UsageRecipes/README.md) — runnable API examples and lifecycle guidance
 - [`docs/analyzers/`](docs/analyzers/) — analyzer rule reference
 - [`docs/benchmarks/`](docs/benchmarks/) — full benchmark results
 - [`docs/RELEASE.md`](docs/RELEASE.md) — manual release checklist

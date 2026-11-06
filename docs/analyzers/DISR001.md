@@ -52,7 +52,7 @@ public sealed class DbWriteWorker : IWorkHandler<OrderEvent>
 }
 
 disruptor.HandleEventsWith(logic)
-         .ThenWorkerPool(workers: 4, i => new DbWriteWorker(_database));
+         .ThenWorkerPool(workerCount: 4, i => new DbWriteWorker(_database));
 ```
 
 **Option 2 — copy what you need and hand it off:**
@@ -65,10 +65,15 @@ public sealed class GoodHandler : IEventHandler<OrderEvent>
     public void OnEvent(OrderEvent e, long sequence, bool endOfBatch)
     {
         // Snapshot out of the slot, then let another stage do the async work.
-        _slow.Writer.TryWrite(OrderSnapshot.From(e));
+        if (!_slow.Writer.TryWrite(OrderSnapshot.From(e)))
+            throw new InvalidOperationException("Snapshot sink is full or closed.");
     }
 }
 ```
+
+Handle a rejected handoff explicitly. Throwing routes it to the processor's exception policy;
+the default Skip does not make that snapshot durable or retry it. Configure the policy required
+by your application. Give each worker its own mutable dependencies where necessary.
 
 **Option 3 — use the async processor**, where a *batch* is the ordering unit:
 

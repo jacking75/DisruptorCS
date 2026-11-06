@@ -5,6 +5,7 @@
     <Project Path="samples/GameLoopPoller/GameLoopPoller.csproj" />
     <Project Path="samples/MatchSimulation/MatchSimulation.csproj" />
     <Project Path="samples/ReplayInspector/ReplayInspector.csproj" />
+    <Project Path="samples/UsageRecipes/UsageRecipes.csproj" />
   </Folder>
   <Project Path="Disruptor.Analyzers.Tests/Disruptor.Analyzers.Tests.csproj" />
   <Project Path="Disruptor.Analyzers/Disruptor.Analyzers.csproj" />
@@ -14,5 +15,4 @@
   <Project Path="Disruptor.Soak/Disruptor.Soak.csproj" />
   <Project Path="Disruptor.Tests/Disruptor.Tests.csproj" />
   <Project Path="Disruptor/Disruptor.csproj" />
-  <Project Path="Example/Example.csproj" />
 </Solution>

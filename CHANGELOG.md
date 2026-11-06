@@ -6,7 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- Async waits now complete on cancellation without requiring another publish or explicit signal.
+  Idle async processors can stop through their external cancellation token alone; cancellation
+  registrations are released when the wait result is consumed.
+- Wrapped batch recovery now identifies the actual failing contiguous segment for both reference
+  and value events. Retry no longer repeats a previously completed segment; Skip no longer discards
+  the unattempted segment after a wrap; Halt preserves completed progress.
+- Synchronous event and batch processors observe cancellation between retry attempts, preventing
+  an endlessly failing retry from consuming CPU after shutdown has been requested.
+- Consecutive-failure accounting now resets only after successful processing, including successful
+  events between failures within one batch. Skipped batches no longer reset the failure streak.
+- Batch handlers now honor automatic slot clearing for successful and skipped segments, retaining
+  payloads on Retry/Halt. A reference-slot cleanup exception is reported and halts that processor
+  rather than retrying business side effects or returning pooled buffers twice.
+- `PublishGate.DropWhenCongested` uses a nonblocking capacity claim after its utilization check.
+  Saturation or a competing producer can no longer turn a drop-policy call into a capacity wait.
+
+### Changed
+
+- Reviewed English/Korean and package documentation: runnable quickstarts, processing/recovery
+  semantics, bounded shutdown, async cancellation, journal durability, sample HTTP behavior,
+  benchmark scope, and local links now reflect the implementation.
+
+- Usage examples now have one entry point under [`samples/`](samples/README.md), with 13 focused
+  recipes and five application samples. The former top-level combined demo has been consolidated.
+- Added deterministic regression coverage for recovery, clearing, cancellation, failure thresholds,
+  and drop-policy saturation. Before/after throughput observations are recorded in
+  [the benchmark guide](docs/benchmarks/README.md#2026-11-07-reliability-changes-throughput-check).
 
 ---
 
@@ -71,6 +99,10 @@ The 0.1.0 and 0.2.0 entries below were development milestones and were never pac
 - `StripedCounter` — contention-free counter used by `PublishGate`.
 
 ### Changed
+
+- Reviewed English/Korean and package documentation: runnable quickstarts, processing/recovery
+  semantics, bounded shutdown, async cancellation, journal durability, sample HTTP behavior,
+  benchmark scope, and local links now reflect the implementation.
 
 - **Consumer loop is now batch-shaped.** `try`/`catch`, failure-streak reset, and `IClearable`
   checks happen at batch boundaries instead of per event. Measured **339M → 649M ops/s (+87%)**

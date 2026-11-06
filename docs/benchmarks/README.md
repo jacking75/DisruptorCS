@@ -1,13 +1,13 @@
 # Benchmarks
 
-All numbers here were produced on:
+Unless a dated section specifies its own environment, numbers here were produced on:
 
 | | |
 |---|---|
 | CPU | Intel Core i7-12700KF (12 physical / 20 logical) |
 | RAM | 64 GB |
 | OS | Windows 11 (10.0.26200) |
-| Runtime | .NET 10.0.400, Release, x64, Server GC |
+| SDK / runtime | SDK 10.0.400 / .NET 10.0.11, Release, x64, Server GC |
 | Harness | BenchmarkDotNet 0.14.0, `RunStrategy.Monitoring` |
 | Compared against | [disruptor-net](https://www.nuget.org/packages/Disruptor) 6.0.1, `System.Threading.Channels` |
 
@@ -20,6 +20,8 @@ dotnet run --project Disruptor.Benchmarks -c Release -- latency
 ```
 
 Raw exports live in [`raw/`](raw/); the latency run is in [`latency.txt`](latency.txt).
+The hardware above is the previously reported environment; the stored BenchmarkDotNet exports
+identify the CPU as `Unknown processor`. SDK and runtime versions are distinct.
 
 ---
 
@@ -33,7 +35,7 @@ lose a reader's trust, and the shape of the loss is itself useful information.
 | Large ring — backpressure is rare | **DisruptorCS** | 1.5× faster than disruptor-net |
 | Small ring — backpressure on nearly every publish | **disruptor-net** | 2.9× faster than DisruptorCS |
 | Multi-producer, small ring | **disruptor-net** | 1.3× (2 producers) – 1.8× (8 producers) |
-| vs `Channel<T>` (any condition) | **DisruptorCS** | 8–38× faster, 25–1,360× less allocation |
+| vs `Channel<T>` (measured configurations) | **DisruptorCS** | 8–38× faster, 25–1,360× less allocation |
 
 The pattern is consistent and reproducible: **our per-event cost is lower, our backpressure
 handoff is more expensive.** See [the open item](#open-item-backpressure-bound-throughput) below.
@@ -58,9 +60,10 @@ At ring 65,536 the consumer keeps up, so this measures raw per-event publish + d
 At ring 1,024 the ring is saturated and nearly every publish must wait for the consumer to free a
 slot. disruptor-net's cost barely changes between the two ring sizes; ours rises ~6×.
 
-`Channel<T>` allocates an object per event, which is where the 1,360× allocation ratio comes from.
-It is not a defect of `Channel<T>` — it is the design difference that makes a ring buffer a ring
-buffer.
+This benchmark allocates a new reference-type event for every channel write while the Disruptor
+reuses preallocated slots. The allocation ratio includes that payload-ownership choice; it is not
+an inherent per-event allocation requirement of `Channel<T>`. Value-type payloads or pooling would
+need a separate comparison.
 
 ## Multi-producer: N producers → 1 consumer, 200,000 events each, ring 1,024
 
@@ -74,7 +77,7 @@ buffer.
 Same story: ring 1,024 means constant backpressure. Correctness is unaffected — the integrity
 suite runs the identical configuration and confirms **0 lost events, 0 slot overwrites**.
 
-## Single-producer throughput (Example scenario 12)
+## Historical single-producer throughput (retired combined demo)
 
 10,000,000 events, ring 65,536, `YieldingWaitStrategy`, trivial handler:
 
@@ -84,9 +87,17 @@ suite runs the identical configuration and confirms **0 lost events, 0 slot over
 | Latency | **4.0 ns/op** |
 | Allocated | **0 bytes** (0.0000 B/event) |
 
-Reproduce with `dotnet run --project Example -c Release`.
+These measurements came from scenario 12 of the retired combined demo. They are retained as
+historical results, not measurements of the learning recipes. For current throughput measurements:
 
-## Game-server scenarios (Example)
+```bash
+dotnet run --project Disruptor.Benchmarks -c Release -- --filter '*UnicastBenchmarks*'
+```
+
+`UnicastBenchmarks` uses 1,000,000 events per invocation and includes setup/teardown; its numbers
+are not directly comparable to the old 10,000,000-event loop above.
+
+## Historical game-server scenarios (retired combined demo)
 
 | Scenario | Result |
 |---|---|
@@ -97,7 +108,85 @@ Reproduce with `dotnet run --project Example -c Release`.
 | EventPoller (100,000 events) | 391 frames, **0 extra threads**, checksum matches |
 | Blocking strategy + slow upstream handler | 0.07 cores (no hot-spin) |
 
+For current runnable code, follow the [scenario migration table](../../samples/README.md#where-the-former-combined-demo-went).
+Correctness checks now belong to the recipes and test suite, rather than inline benchmark probes:
+
+```bash
+dotnet run --project samples/UsageRecipes -c Release -- all
+dotnet test Disruptor.Tests -c Release --filter 'FullyQualifiedName~LosslessStressTests'
+```
+
+## 2026-11-07 reliability changes: throughput check
+
+The batch recovery and drop-policy fixes were checked against the unchanged
+`UnicastBenchmarks.DisruptorSingleProducer` benchmark. The baseline library source was commit
+`b119515`; the after run used the working-tree recovery changes. Each invocation publishes
+1,000,000 events and includes setup/teardown. Both runs used .NET SDK 10.0.301, runtime 10.0.9,
+Release/x64, non-concurrent Server GC, and Windows build 26300.9818. BenchmarkDotNet could not
+identify the processor or change the power plan in this environment.
+
+| Ring size | Before mean | After mean | Before median | After median |
+|---|---:|---:|---:|---:|
+| 1,024 | 19.995 ms | 19.049 ms | 17.255 ms | 18.933 ms |
+| 65,536 | 4.111 ms | 3.661 ms | 4.141 ms | 3.853 ms |
+
+These are **regression-check observations, not a speedup claim**. There were only five measured
+iterations after two warmups, iterations were shorter than BenchmarkDotNet recommends, and the
+99.9% confidence intervals overlap substantially. The small-ring median increased while its mean
+decreased. This does not establish performance equivalence, or say anything about all other
+producer/consumer topologies. The fixes prioritize correct recovery, bounded retry shutdown,
+payload release, and avoiding capacity waits in the drop policy; no per-event cancellation check
+was added to the normal synchronous event loop.
+
+Raw evidence: [before CSV](reliability-2026-11-07/before.csv),
+[after CSV](reliability-2026-11-07/after.csv),
+[before full output](reliability-2026-11-07/before.txt),
+[after full output](reliability-2026-11-07/after.txt).
+
+```bash
+dotnet run --project Disruptor.Benchmarks -c Release -- --filter '*UnicastBenchmarks.DisruptorSingleProducer*' --artifacts artifacts/reliability-check
+```
+
+The deterministic tests in `BatchRecoveryTests` and `PublishGateSaturationTests` cover the failure
+paths that this throughput benchmark does not exercise. In particular, a four-slot ring forces
+one batch to split at the wrap boundary, and an injected second-segment failure distinguishes
+retrying only that segment from replaying the already completed first segment.
+
+The separately added async cancellation fix is covered by `AsyncCancellationTests` (idle wait,
+external-token shutdown, and cancellation racing publication). This synchronous throughput
+benchmark does not measure async waiting or cancellation-registration overhead.
+
+Validation of the reliability changes:
+
+| Check | Result |
+|---|---|
+| Full solution, Release | Build succeeded, zero warnings/errors |
+| Core tests, Release and Debug | 141 passed in each configuration, including 28 new regression cases |
+| Analyzer tests, Release | 20 passed |
+| Stress suite | 20 consecutive passes, 180 test cases in total |
+| Async cancellation suite | 10 consecutive passes, including 2,000 cancellation/publication races |
+| Usage recipes | All 13 passed in Release and Debug |
+| 10-minute soak, seed `12345` | 13,838 rounds, zero invariant violations |
+
+The soak processed 276,760,000 events through the multi-producer backpressure scenario with zero
+losses, plus 138,380,000 events each through multicast, exception injection, and sharding.
+All three multicast handlers agreed; sharding reported zero ordering violations. The exception
+scenario deliberately injected 138,051 failures and reported zero halted processors. Final
+managed heap usage was 2.4 MB (1.5 MB above baseline), with 44 threads (six below baseline).
+The [full soak output](reliability-2026-11-07/soak.txt) includes periodic resource observations.
+
+These four soak scenarios exercise synchronous paths. The soak ran with the batch and drop-policy
+fixes before the async cancellation fix was added; async behavior was checked separately by the
+tests above. Passing these checks does not establish correctness for every workload.
+
+```bash
+dotnet run --project Disruptor.Soak -c Release -- --minutes 10 --seed 12345 --report-seconds 30
+```
+
 ## Soak
+
+See also the [2026-11-07 reliability check](#2026-11-07-reliability-changes-throughput-check)
+for the batch-recovery and drop-policy changes.
 
 `dotnet run --project Disruptor.Soak -c Release -- --minutes 30`
 
@@ -185,5 +274,6 @@ A standalone probe (raw `BatchEventProcessor`, no DSL) shows only a ~15% penalty
 65,536 — so the gap is likely somewhere in the DSL/shutdown path or in the specific handoff pattern
 the benchmark creates, not in the sequencer core.
 
-If you want to pick this up, `IMPROVEMENTS.md` §2 has the probe methodology, and
-`Disruptor.Benchmarks/ComparisonBenchmarks.cs` is the reproduction. Please bring a measurement.
+Reproduce the comparison with [ComparisonBenchmarks.cs](../../Disruptor.Benchmarks/ComparisonBenchmarks.cs)
+and the commands at the top of this guide. The standalone probe source is not included in this
+repository; its observation above is historical context, not a reproducible benchmark artifact.

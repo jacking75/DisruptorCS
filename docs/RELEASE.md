@@ -17,7 +17,7 @@ minor version.
 # Warnings are errors, so a clean build is a real signal.
 dotnet build DisruptorCS.slnx -c Release
 
-# Memory-ordering defects only surface with optimizations on.
+# Include optimized builds: JIT optimizations can expose additional memory-ordering defects.
 dotnet test Disruptor.Tests -c Release
 
 # Debug-only diagnostics (single-producer misuse, async handler detection) run only here.
@@ -60,12 +60,19 @@ For a release after significant concurrency changes, run `--hours 8` overnight i
 ## 4. End-to-end gate
 
 ```bash
-dotnet run --project Example -c Release | tee /tmp/example-output.txt
-grep -E "유실 발생|결함 회귀|불일치|순서 위반" /tmp/example-output.txt && echo "FAILED" || echo "OK"
+dotnet run --project samples/UsageRecipes -c Release -- all
+dotnet run --project samples/UsageRecipes -c Debug -- all
+dotnet run --project samples/ReplayInspector -c Release
+dotnet run --project samples/MatchSimulation -c Release
 ```
 
-- [ ] No loss/regression strings in the output
-- [ ] Sample projects under `samples/` still run
+- [ ] UsageRecipes: all 13 recipes print `PASS`, exit code 0 in Release and Debug
+- [ ] ReplayInspector demo and MatchSimulation complete successfully
+- [ ] Remaining application samples in the [samples guide](../samples/README.md) still run;
+      check the ASP.NET Core endpoints and stop that host with Ctrl+C
+
+Check each command's exit code before continuing. UsageRecipes verifies its results directly;
+the old combined demo and output-string grep are no longer used.
 
 ## 5. Performance gate
 
@@ -115,11 +122,11 @@ does not load, or a documented snippet that does not compile.
 
 ```powershell
 $feed = (Resolve-Path ./artifacts).Path
-$scratch = Join-Path $env:TEMP 'disruptorcs-consumer'
-Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+$scratch = Join-Path $env:TEMP ('disruptorcs-consumer-' + [guid]::NewGuid().ToString('N'))
 dotnet new console -o $scratch
 Push-Location $scratch
-dotnet nuget add source $feed --name local
+dotnet new nugetconfig
+dotnet nuget add source $feed --name local --configfile ./nuget.config
 dotnet add package DisruptorCS --version 0.10.0
 dotnet add package DisruptorCS.Extensions.Hosting --version 0.10.0
 ```
@@ -128,6 +135,9 @@ dotnet add package DisruptorCS.Extensions.Hosting --version 0.10.0
 - [ ] A deliberate ring size of `1000` produces **DISR004** — the analyzer shipped and loads
 - [ ] `services.AddDisruptor<T>(...)` resolves **without** an extra `using` — the extension lives
       in `Microsoft.Extensions.DependencyInjection`
+
+After the consumer checks, run `Pop-Location` before continuing with repository commands.
+The feed is added only to the scratch project's NuGet configuration.
 
 ## 8. Documentation gate
 
@@ -139,6 +149,9 @@ dotnet add package DisruptorCS.Extensions.Hosting --version 0.10.0
       version's API — these are what nuget.org renders, and **relative links do not work there**,
       so every link in them must be absolute
 - [ ] New public API has XML docs
+- [ ] [Processing semantics](processing-semantics.md) and its [Korean version](processing-semantics.ko.md)
+      match recovery, cancellation, ownership, and shutdown behavior
+- [ ] Quickstarts compile as pasted; local links and heading anchors resolve
 
 ## 9. Ship
 

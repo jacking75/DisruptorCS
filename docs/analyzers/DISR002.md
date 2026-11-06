@@ -11,7 +11,7 @@
 
 `Next()` reserves a slot. Until that exact sequence is published, **gating cannot advance past it**.
 A single unpublished slot therefore stops every consumer and, once the ring wraps, blocks every
-producer — permanently. There is no timeout and no recovery.
+producer. Timing out a later capacity wait does not repair that publication gap.
 
 If the code between `Next()` and `Publish()` can throw, the exception path must still publish.
 
@@ -40,12 +40,12 @@ finally
 }
 ```
 
-**Option 2 — the scope pattern** (structurally impossible to get wrong):
+**Option 2 — a narrowly scoped publication block:**
 
 ```csharp
 using (var scope = ring.PublishEventScope())
 {
-    Fill(scope.Event(), command);
+    Fill(scope.Event, command);
 }   // publishes on Dispose, including on the exception path
 ```
 
@@ -55,10 +55,11 @@ using (var scope = ring.PublishEventScope())
 ring.PublishEvent(static (evt, seq, cmd) => Fill(evt, cmd), command);
 ```
 
-## Publishing a half-written event is usually still correct
+## Explicitly mark failed fills
 
-A slot that was claimed must be published. If the payload turned out to be garbage, mark it and let
-the handler skip it:
+A claimed slot must be published to preserve sequence continuity, but a half-written business event
+is not automatically safe. Validate before claiming where possible. Otherwise, mark failed fills
+and make every downstream stage check that marker:
 
 ```csharp
 long seq = ring.Next();

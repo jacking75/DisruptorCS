@@ -8,8 +8,8 @@ Everything below exists because of that.
 
 > Measure before you optimize, and publish the measurement.
 
-Every performance claim in this repository is backed by a number in `docs/benchmarks/` or a probe
-result recorded in `IMPROVEMENTS.md`. Two of the biggest optimizations we *didn't* ship were killed
+Record new performance claims with reproducible commands and raw results in `docs/benchmarks/`.
+Historical probe observations without source are context, not a substitute for a new measurement. Two of the biggest optimizations we *didn't* ship were killed
 by measurement:
 
 - Struct-generic devirtualization of the handler call — .NET's Dynamic PGO already handles the
@@ -36,7 +36,7 @@ You need the .NET 10 SDK. The library multi-targets `net8.0` and `net10.0`.
 # Warnings are errors — a clean build is a real signal.
 dotnet build DisruptorCS.slnx -c Release
 
-# Memory-ordering defects only surface with optimizations on.
+# Include optimized builds: JIT optimizations can expose additional memory-ordering defects.
 dotnet test Disruptor.Tests -c Release
 dotnet test Disruptor.Analyzers.Tests -c Release
 
@@ -95,8 +95,9 @@ dotnet run --project Disruptor.Soak -c Release -- --minutes 10
 - Public API gets XML docs. Prefer documenting the trap over documenting the parameter.
 - Korean is fine in internal implementation comments; **public XML docs should be English** so
   IntelliSense works for everyone.
-- No `Thread.Sleep(1)` anywhere. Windows' 15.6 ms timer resolution turns it into a lost tick.
-  Use `SpinWait.SpinOnce(sleep1Threshold: -1)`.
+- Keep `Thread.Sleep(1)` out of default spin/backoff paths. Use
+  `SpinWait.SpinOnce(sleep1Threshold: -1)` there; explicitly selected sleeping strategies are
+  deliberate CPU/latency trade-offs and must document that behavior.
 
 ## Adding an analyzer rule
 
@@ -110,7 +111,6 @@ Good first contribution. Pattern:
 
 Candidate rules we'd welcome:
 
-- DISR005: retaining a slot reference from an `IBatchEventHandler` span past the call.
 - Detecting `ProducerType.Single` where the publish site is reachable from multiple threads.
 - Flagging a `BusySpinWaitStrategy` in a project that also targets a container runtime.
 

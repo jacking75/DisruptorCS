@@ -68,6 +68,7 @@ public sealed class AsyncWaitStrategy : IWaitStrategy, IAsyncWaitStrategy
     }
 
     /// <inheritdoc/>
+    /// <remarks>Cancellation completes a pending async wait without requiring a publication signal.</remarks>
     public ValueTask<SequenceWaitResult> WaitForAsync(
         long sequence, DependentSequenceGroup dependents, CancellationToken cancellationToken)
     {
@@ -78,8 +79,10 @@ public sealed class AsyncWaitStrategy : IWaitStrategy, IAsyncWaitStrategy
         if (cancellationToken.IsCancellationRequested)
             return new ValueTask<SequenceWaitResult>(SequenceWaitResult.Cancelled);
 
-        var waiter = new Waiter(sequence, dependents, cancellationToken);
+        var waiter = new Waiter(this, sequence, dependents, cancellationToken);
         _asyncWaiters.Enqueue(waiter);
+        // Register after enqueue: an already-cancelled token must be able to remove its waiter.
+        waiter.RegisterCancellation();
 
         // 큐에 넣은 뒤 재확인 — 그 사이에 게시가 일어났으면 스스로 완료시킨다.
         // (게시자가 큐를 비우는 시점과 우리가 큐에 넣는 시점의 경쟁을 닫는다)
@@ -124,15 +127,18 @@ public sealed class AsyncWaitStrategy : IWaitStrategy, IAsyncWaitStrategy
     /// </summary>
     private sealed class Waiter : IValueTaskSource<SequenceWaitResult>
     {
+        private readonly AsyncWaitStrategy _owner;
         private readonly long _sequence;
         private readonly DependentSequenceGroup _dependents;
         private readonly CancellationToken _cancellationToken;
 
         private ManualResetValueTaskSourceCore<SequenceWaitResult> _core;
         private int _completed;
+        private CancellationTokenRegistration _registration;
 
-        public Waiter(long sequence, DependentSequenceGroup dependents, CancellationToken cancellationToken)
+        public Waiter(AsyncWaitStrategy owner, long sequence, DependentSequenceGroup dependents, CancellationToken cancellationToken)
         {
+            _owner = owner;
             _sequence = sequence;
             _dependents = dependents;
             _cancellationToken = cancellationToken;
@@ -142,6 +148,20 @@ public sealed class AsyncWaitStrategy : IWaitStrategy, IAsyncWaitStrategy
         }
 
         public ValueTask<SequenceWaitResult> AsValueTask() => new(this, _core.Version);
+
+        public void RegisterCancellation()
+        {
+            if (_cancellationToken.CanBeCanceled)
+                _registration = _cancellationToken.Register(static state => ((Waiter)state!).Cancel(), this);
+        }
+
+        private void Cancel()
+        {
+            // Complete directly: a publisher may temporarily have dequeued this waiter, so
+            // scanning the queue alone can miss it and leave an idle consumer asleep forever.
+            Complete(SequenceWaitResult.Cancelled);
+            _owner.CompleteAsyncWaiters();
+        }
 
         /// <summary>조건이 충족되었으면 완료시키고 true 를 반환합니다.</summary>
         public bool TryComplete()
@@ -168,7 +188,11 @@ public sealed class AsyncWaitStrategy : IWaitStrategy, IAsyncWaitStrategy
             return true;
         }
 
-        public SequenceWaitResult GetResult(short token) => _core.GetResult(token);
+        public SequenceWaitResult GetResult(short token)
+        {
+            try { return _core.GetResult(token); }
+            finally { _registration.Dispose(); }
+        }
 
         public ValueTaskSourceStatus GetStatus(short token) => _core.GetStatus(token);
 

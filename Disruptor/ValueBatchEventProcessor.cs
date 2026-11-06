@@ -175,6 +175,12 @@ public sealed class ValueBatchEventProcessor<T> : IEventProcessor, IDisposable w
 
             while (nextSequence <= available)
             {
+                if (ct.IsCancellationRequested)
+                {
+                    _sequence.SetValue(nextSequence - 1);
+                    return;
+                }
+
                 if (ProcessSegment(ref nextSequence, available))
                     continue;
 
@@ -185,12 +191,6 @@ public sealed class ValueBatchEventProcessor<T> : IEventProcessor, IDisposable w
 
             _sequence.SetValue(available);
 
-            if (_hasPendingFailure)
-            {
-                _exceptionHandler.OnEventProcessed();
-                _hasPendingFailure = false;
-            }
-
             Recorder?.OnBatchCompleted(batchSize);
 
             if (_signalNeeded)
@@ -200,16 +200,14 @@ public sealed class ValueBatchEventProcessor<T> : IEventProcessor, IDisposable w
 
     private bool ProcessSegment(ref long nextSequence, long available)
     {
+        if (_batchHandler is not null)
+            return ProcessBatchSegment(ref nextSequence, available);
+
         long current = nextSequence;
 
         try
         {
-            if (_batchHandler is not null)
-            {
-                DispatchBatch(_batchHandler, current, available);
-                current = available + 1;
-            }
-            else if (ClearAfterProcess)
+            if (ClearAfterProcess)
             {
                 var handler = _eventHandler!;
                 while (current <= available)
@@ -229,18 +227,22 @@ public sealed class ValueBatchEventProcessor<T> : IEventProcessor, IDisposable w
                 }
             }
 
+            ResetFailureAfterSuccess();
             nextSequence = current;
             return true;
         }
         catch (Exception ex)
         {
+            if (current > nextSequence)
+                ResetFailureAfterSuccess();
+
             Recorder?.OnHandlerError();
             _hasPendingFailure = true;
 
             switch (SafeHandleException(ex, current))
             {
                 case EventExceptionAction.Skip:
-                    nextSequence = _batchHandler is not null ? available + 1 : current + 1;
+                    nextSequence = current + 1;
                     return true;
 
                 case EventExceptionAction.Retry:
@@ -255,23 +257,45 @@ public sealed class ValueBatchEventProcessor<T> : IEventProcessor, IDisposable w
         }
     }
 
-    /// <summary>배치를 랩 경계에서 최대 2개의 연속 조각으로 나눠 전달합니다.</summary>
-    private void DispatchBatch(IValueBatchEventHandler<T> handler, long from, long to)
+    private void ResetFailureAfterSuccess()
     {
+        if (!_hasPendingFailure) return;
+        _exceptionHandler.OnEventProcessed();
+        _hasPendingFailure = false;
+    }
+
+    private bool ProcessBatchSegment(ref long nextSequence, long available)
+    {
+        long current = nextSequence;
         int bufferSize = _ringBuffer.BufferSize;
-        long current = from;
+        int startIndex = (int)current & (bufferSize - 1);
+        long segmentEnd = Math.Min(available, current + bufferSize - startIndex - 1);
 
-        while (current <= to)
+        try
         {
-            int startIndex = (int)current & (bufferSize - 1);
-            long segmentEnd = Math.Min(to, current + (bufferSize - startIndex) - 1);
-
-            handler.OnBatch(_ringBuffer.GetSegment(current, segmentEnd),
-                            current,
-                            endOfBatch: segmentEnd == to);
-
-            current = segmentEnd + 1;
+            _batchHandler!.OnBatch(_ringBuffer.GetSegment(current, segmentEnd), current, segmentEnd == available);
+            ResetFailureAfterSuccess();
         }
+        catch (Exception ex)
+        {
+            Recorder?.OnHandlerError();
+            _hasPendingFailure = true;
+            switch (SafeHandleException(ex, current))
+            {
+                case EventExceptionAction.Skip:
+                    break;
+                case EventExceptionAction.Retry:
+                    return true;
+                default:
+                    _lastFault = ex;
+                    return false;
+            }
+        }
+
+        if (ClearAfterProcess)
+            _ringBuffer.GetSegment(current, segmentEnd).Clear();
+        nextSequence = segmentEnd + 1;
+        return true;
     }
 
     private void InvokeBatchStart(long batchSize)
