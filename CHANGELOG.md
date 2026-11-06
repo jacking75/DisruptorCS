@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.10.1] - 2026-11-07
+
 ### Fixed
 
 - Async waits now complete on cancellation without requiring another publish or explicit signal.
@@ -215,5 +219,6 @@ four wait strategies, and the DSL.
 
 ---
 
-[Unreleased]: https://github.com/jacking75/DisruptorCS/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/jacking75/DisruptorCS/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/jacking75/DisruptorCS/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/jacking75/DisruptorCS/releases/tag/v0.10.0

@@ -101,7 +101,7 @@ the icon, both target frameworks, the XML docs, and the symbol package are actua
 
 ```powershell
 # 태그를 찍기 전 예행 연습 (버전을 강제)
-./build/pack.ps1 -Version 0.10.0
+./build/pack.ps1 -Version 0.10.1
 
 # 태그를 찍은 뒤 실제 산출물 (MinVer 가 git 태그에서 버전을 읽는다)
 ./build/pack.ps1
@@ -110,9 +110,9 @@ the icon, both target frameworks, the XML docs, and the symbol package are actua
 - [ ] `build/pack.ps1` exits 0 — every `[OK]`, no `[누락]`
 - [ ] The version on the produced files is the version you intend to ship
 
-Version comes from MinVer: the tag `v0.10.0` produces `0.10.0`. Without a tag, the
-`MinVerMinimumMajorMinor` floor in `Directory.Build.props` produces `0.10.0-preview.0.N`, so an
-accidental untagged pack is obviously a pre-release rather than silently a wrong version.
+Version comes from MinVer: the tag `v0.10.1` produces `0.10.1`. Away from a release tag, MinVer
+computes a prerelease version from the reachable tags and the `MinVerMinimumMajorMinor` floor.
+Check the actual package version rather than assuming a particular preview suffix.
 
 ## 7. Consumer gate
 
@@ -127,8 +127,8 @@ dotnet new console -o $scratch
 Push-Location $scratch
 dotnet new nugetconfig
 dotnet nuget add source $feed --name local --configfile ./nuget.config
-dotnet add package DisruptorCS --version 0.10.0
-dotnet add package DisruptorCS.Extensions.Hosting --version 0.10.0
+dotnet add package DisruptorCS --version 0.10.1
+dotnet add package DisruptorCS.Extensions.Hosting --version 0.10.1
 ```
 
 - [ ] A quickstart snippet copied from `Disruptor/PACKAGE.md` compiles and runs
@@ -156,14 +156,14 @@ The feed is added only to the scratch project's NuGet configuration.
 ## 9. Ship
 
 ```powershell
-git tag v0.10.0
+git tag v0.10.1
 git push origin main --tags
 
 ./build/pack.ps1                 # 태그가 찍힌 상태에서 다시 만든다
 
-dotnet nuget push artifacts/DisruptorCS.0.10.0.nupkg `
+dotnet nuget push artifacts/DisruptorCS.0.10.1.nupkg `
   --source https://api.nuget.org/v3/index.json --api-key $env:NUGET_API_KEY
-dotnet nuget push artifacts/DisruptorCS.Extensions.Hosting.0.10.0.nupkg `
+dotnet nuget push artifacts/DisruptorCS.Extensions.Hosting.0.10.1.nupkg `
   --source https://api.nuget.org/v3/index.json --api-key $env:NUGET_API_KEY
 ```
 
@@ -186,7 +186,7 @@ is no separate push for them.
 NuGet packages cannot be deleted, only unlisted:
 
 ```powershell
-dotnet nuget delete DisruptorCS 0.10.0 --source https://api.nuget.org/v3/index.json `
+dotnet nuget delete DisruptorCS 0.10.1 --source https://api.nuget.org/v3/index.json `
   --api-key $env:NUGET_API_KEY --non-interactive
 ```
 
